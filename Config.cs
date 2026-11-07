@@ -20,6 +20,7 @@ public sealed class AppConfig
 {
     public string Theme { get; set; } = "aurora";
     public string? ActiveProvider { get; set; }
+    public string ActiveAgent { get; set; } = "ask";
     public string SystemPrompt { get; set; } =
         "You are ctv, a helpful and concise assistant living in the user's terminal.";
     public List<ProviderConfig> Providers { get; set; } = new();
@@ -37,6 +38,9 @@ public sealed class AppConfig
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(AppConfig))]
 [JsonSerializable(typeof(List<ChatMessage>))]
+[JsonSerializable(typeof(List<string>))]
+[JsonSerializable(typeof(List<TodoItem>))]
+[JsonSerializable(typeof(List<PendingQuestion>))]
 internal partial class ConfigJson : JsonSerializerContext;
 
 public sealed record Preset(string Id, string Name, string Kind, string BaseUrl, string Model, string? KeyEnv);
@@ -100,4 +104,3 @@ public static class ConfigStore
             ? Environment.GetEnvironmentVariable(p.ApiKey[4..]) ?? ""
             : p.ApiKey;
 }
-
