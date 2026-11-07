@@ -1,3 +1,4 @@
+
 using Spectre.Console;
 
 namespace Ctv;
@@ -26,6 +27,10 @@ public static class Commands
                 t.AddRow("/system", "edit the system prompt");
                 t.AddRow("/config", "show config file and configured providers");
                 t.AddRow("/permissions", "view and manage the safety allow-list");
+                t.AddRow("/save <name>", "save current conversation to a session");
+                t.AddRow("/load <name>", "load a saved session (replaces current history)");
+                t.AddRow("/sessions", "list saved sessions");
+                t.AddRow("/delete-session <name>", "remove a saved session");
                 t.AddRow("/clear", "clear the conversation and session permissions");
                 t.AddRow("/quit", "exit (Ctrl+C stops a running answer)");
                 AnsiConsole.WriteLine();
@@ -84,9 +89,69 @@ public static class Commands
                 Ui.Banner(cfg);
                 break;
 
-            case "/permissions":
-                ShowPermissions(cfg);
-                break;
+            case "/save":
+                {
+                    if (string.IsNullOrWhiteSpace(arg))
+                    {
+                        AnsiConsole.MarkupLine("[red]Usage:[/] /save <name>");
+                        break;
+                    }
+                    Sessions.Save(arg, history);
+                    AnsiConsole.MarkupLine($"[green]Saved session '{Markup.Escape(arg)}' ({history.Count} messages).[/]");
+                    break;
+                }
+
+            case "/load":
+                {
+                    if (string.IsNullOrWhiteSpace(arg))
+                    {
+                        AnsiConsole.MarkupLine("[red]Usage:[/] /load <name>");
+                        break;
+                    }
+                    var loaded = Sessions.Load(arg);
+                    if (loaded is null)
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Session '{Markup.Escape(arg)}' not found.[/]");
+                        break;
+                    }
+                    history.Clear();
+                    foreach (var m in loaded) history.Add(m);
+                    AnsiConsole.MarkupLine($"[green]Loaded session '{Markup.Escape(arg)}' ({history.Count} messages).[/]");
+                    break;
+                }
+
+            case "/sessions":
+                {
+                    var list = Sessions.List();
+                    if (list.Count == 0)
+                    {
+                        AnsiConsole.MarkupLine("[dim]No saved sessions.[/]");
+                        break;
+                    }
+                    var st = new Table().RoundedBorder().AddColumn("name").AddColumn("messages");
+                    foreach (var name in list)
+                    {
+                        var loaded = Sessions.Load(name);
+                        st.AddRow(Markup.Escape(name), loaded?.Count.ToString() ?? "0");
+                    }
+                    AnsiConsole.WriteLine();
+                    AnsiConsole.Write(st);
+                    AnsiConsole.WriteLine();
+                    break;
+                }
+
+            case "/delete-session":
+            case "/rm-session":
+                {
+                    if (string.IsNullOrWhiteSpace(arg))
+                    {
+                        AnsiConsole.MarkupLine("[red]Usage:[/] /delete-session <name>");
+                        break;
+                    }
+                    Sessions.Delete(arg);
+                    AnsiConsole.MarkupLine($"[dim]Deleted session '{Markup.Escape(arg)}'.[/]");
+                    break;
+                }
 
             default:
                 AnsiConsole.MarkupLine($"[yellow]Unknown command[/] {Markup.Escape(cmd)} - try /help");
@@ -264,3 +329,4 @@ public static class Commands
         }
     }
 }
+

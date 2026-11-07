@@ -1,3 +1,4 @@
+
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -35,6 +36,7 @@ public sealed class AppConfig
 
 [JsonSourceGenerationOptions(WriteIndented = true, PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(AppConfig))]
+[JsonSerializable(typeof(List<ChatMessage>))]
 internal partial class ConfigJson : JsonSerializerContext;
 
 public sealed record Preset(string Id, string Name, string Kind, string BaseUrl, string Model, string? KeyEnv);
@@ -98,3 +100,4 @@ public static class ConfigStore
             ? Environment.GetEnvironmentVariable(p.ApiKey[4..]) ?? ""
             : p.ApiKey;
 }
+
