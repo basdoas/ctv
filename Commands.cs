@@ -25,9 +25,15 @@ public static class Commands
                 t.AddRow("/theme", "pick a color theme");
                 t.AddRow("/system", "edit the system prompt");
                 t.AddRow("/config", "show config file and configured providers");
-                t.AddRow("/clear", "clear the conversation");
+                t.AddRow("/permissions", "view and manage the safety allow-list");
+                t.AddRow("/clear", "clear the conversation and session permissions");
                 t.AddRow("/quit", "exit (Ctrl+C stops a running answer)");
+                AnsiConsole.WriteLine();
                 AnsiConsole.Write(t);
+                AnsiConsole.WriteLine();
+                AnsiConsole.MarkupLine("[dim]File access:  prefix a path with [bold]@[/] → @./file.txt what does this do?[/]");
+                AnsiConsole.MarkupLine("[dim]Shell access: prefix a command with [bold]![/] → !git log --oneline -10[/]");
+                AnsiConsole.MarkupLine("[dim]              Add a question after two spaces → !ls -la  explain the output[/]");
                 break;
 
             case "/login":
@@ -73,8 +79,13 @@ public static class Commands
 
             case "/clear":
                 history.Clear();
+                SafetyGate.ClearSession();
                 AnsiConsole.Clear();
                 Ui.Banner(cfg);
+                break;
+
+            case "/permissions":
+                ShowPermissions(cfg);
                 break;
 
             default:
@@ -196,5 +207,60 @@ public static class Commands
         }
         AnsiConsole.Write(t);
         AnsiConsole.MarkupLine($"theme: [bold]{Markup.Escape(cfg.Theme)}[/]");
+    }
+
+    static void ShowPermissions(AppConfig cfg)
+    {
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine($"[bold]Auto-approve:[/] {(cfg.AutoApprove ? "[green]on[/]" : "[dim]off[/]")}");
+        AnsiConsole.WriteLine();
+
+        if (cfg.AllowedActions.Count == 0)
+        {
+            AnsiConsole.MarkupLine("[dim]No persistent allow-list entries.[/]");
+        }
+        else
+        {
+            var t = new Table().RoundedBorder()
+                .AddColumn("#").AddColumn("allowed action");
+            for (int i = 0; i < cfg.AllowedActions.Count; i++)
+                t.AddRow((i + 1).ToString(), Markup.Escape(cfg.AllowedActions[i]));
+            AnsiConsole.Write(t);
+        }
+
+        AnsiConsole.WriteLine();
+
+        const string toggleAuto  = "Toggle auto-approve";
+        const string removeEntry = "Remove an allow-list entry";
+        const string clearAll    = "Clear entire allow-list";
+        const string done        = "Done";
+
+        var action = Ui.Choose("What would you like to do?",
+            [toggleAuto, removeEntry, clearAll, done]);
+
+        switch (action)
+        {
+            case toggleAuto:
+                if (cfg.AutoApprove) SafetyGate.DisableAutoApprove(cfg);
+                else { cfg.AutoApprove = true; ConfigStore.Save(cfg); }
+                AnsiConsole.MarkupLine($"Auto-approve is now [bold]{(cfg.AutoApprove ? "on" : "off")}[/].");
+                break;
+
+            case removeEntry when cfg.AllowedActions.Count > 0:
+                var pick = Ui.Choose("Remove which entry?", cfg.AllowedActions);
+                SafetyGate.RemoveAllowedAction(pick, cfg);
+                AnsiConsole.MarkupLine($"[dim]Removed: {Markup.Escape(pick)}[/]");
+                break;
+
+            case removeEntry:
+                AnsiConsole.MarkupLine("[dim]Allow-list is already empty.[/]");
+                break;
+
+            case clearAll:
+                cfg.AllowedActions.Clear();
+                ConfigStore.Save(cfg);
+                AnsiConsole.MarkupLine("[dim]Allow-list cleared.[/]");
+                break;
+        }
     }
 }

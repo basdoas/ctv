@@ -56,7 +56,31 @@ while (true)
         continue;
     }
 
-    await Send(line);
+    if (line.StartsWith('!'))
+    {
+        gen = new CancellationTokenSource();
+        string? prompt;
+        try
+        {
+            prompt = await ToolRunner.TryRunAsync(line, cfg, gen.Token);
+        }
+        finally
+        {
+            gen.Dispose();
+            gen = null;
+        }
+
+        if (prompt is not null)
+        {
+            await Send(prompt);
+        }
+        continue;
+    }
+
+    var processed = FileAttachment.ProcessAttachments(line, cfg);
+    if (processed is null) continue;
+
+    await Send(processed);
 }
 
 AnsiConsole.MarkupLine("[dim]bye 👋[/]");
@@ -69,49 +93,101 @@ async Task Send(string text)
 
     var theme = Ui.Get(cfg);
     history.Add(new ChatMessage("user", text));
-    AnsiConsole.MarkupLine($"\n[bold {theme.AccentHex}]ctv[/]");
+    var systemPrompt = SystemPrompts.Build(cfg);
 
-    var answer = new StringBuilder();
-    var sw = Stopwatch.StartNew();
-    gen = new CancellationTokenSource();
-    try
+    const int maxSteps = 8;
+    for (int step = 0; step < maxSteps; step++)
     {
-        var provider = Providers.Create(pc);
-        await using var e = provider.StreamAsync(history, cfg.SystemPrompt, gen.Token).GetAsyncEnumerator(gen.Token);
-
-        bool has = false;
-        await AnsiConsole.Status()
-            .Spinner(Spinner.Known.Dots)
-            .SpinnerStyle(Style.Parse(theme.AccentHex))
-            .StartAsync("thinking…", async _ => { has = await e.MoveNextAsync(); });
-
-        while (has)
+        if (step == 0)
         {
-            Console.Write(e.Current);
-            answer.Append(e.Current);
-            has = await e.MoveNextAsync();
+            AnsiConsole.MarkupLine($"\n[bold {theme.AccentHex}]ctv[/]");
         }
-        Console.WriteLine();
-        AnsiConsole.MarkupLine($"[dim]{sw.Elapsed.TotalSeconds:0.0}s[/]");
-    }
-    catch (OperationCanceledException)
-    {
-        Console.WriteLine();
-        AnsiConsole.MarkupLine("[dim](stopped)[/]");
-    }
-    catch (Exception ex)
-    {
-        Console.WriteLine();
-        AnsiConsole.MarkupLine($"[red]error:[/] {Markup.Escape(ex.Message)}");
-        if (ex.Message.StartsWith("HTTP 4"))
-            AnsiConsole.MarkupLine("[dim]tip: /model browses the models your provider offers, /login updates your API key[/]");
-    }
-    finally
-    {
-        gen.Dispose();
-        gen = null;
-    }
+        else
+        {
+            AnsiConsole.MarkupLine($"\n[bold {theme.AccentHex}]ctv[/] [dim](step {step + 1})[/]");
+        }
 
-    if (answer.Length > 0) history.Add(new ChatMessage("assistant", answer.ToString()));
-    else history.RemoveAt(history.Count - 1); // nothing came back: drop the unanswered user turn
+        var answer = new StringBuilder();
+        var sw = Stopwatch.StartNew();
+        gen = new CancellationTokenSource();
+        bool canceled = false;
+        try
+        {
+            var provider = Providers.Create(pc);
+            await using var e = provider.StreamAsync(history, systemPrompt, gen.Token).GetAsyncEnumerator(gen.Token);
+
+            bool has = false;
+            await AnsiConsole.Status()
+                .Spinner(Spinner.Known.Dots)
+                .SpinnerStyle(Style.Parse(theme.AccentHex))
+                .StartAsync(step == 0 ? "thinking…" : "processing tools…", async _ => { has = await e.MoveNextAsync(); });
+
+            while (has)
+            {
+                Console.Write(e.Current);
+                answer.Append(e.Current);
+                has = await e.MoveNextAsync();
+            }
+            Console.WriteLine();
+            AnsiConsole.MarkupLine($"[dim]{sw.Elapsed.TotalSeconds:0.0}s[/]");
+        }
+        catch (OperationCanceledException)
+        {
+            canceled = true;
+            Console.WriteLine();
+            AnsiConsole.MarkupLine("[dim](stopped)[/]");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine();
+            AnsiConsole.MarkupLine($"[red]error:[/] {Markup.Escape(ex.Message)}");
+            if (ex.Message.StartsWith("HTTP 4"))
+                AnsiConsole.MarkupLine("[dim]tip: /model browses the models your provider offers, /login updates your API key[/]");
+            break;
+        }
+        finally
+        {
+            gen.Dispose();
+            gen = null;
+        }
+
+        if (canceled) break;
+
+        var fullAnswer = answer.ToString();
+        if (fullAnswer.Length == 0)
+        {
+            if (step == 0) history.RemoveAt(history.Count - 1);
+            break;
+        }
+
+        history.Add(new ChatMessage("assistant", fullAnswer));
+
+        if (AgentTools.HasToolCalls(fullAnswer))
+        {
+            gen = new CancellationTokenSource();
+            string? toolResults = null;
+            try
+            {
+                toolResults = await AgentTools.ExecuteToolCallsAsync(fullAnswer, cfg, gen.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                AnsiConsole.MarkupLine("[dim](tool execution interrupted)[/]");
+                break;
+            }
+            finally
+            {
+                gen.Dispose();
+                gen = null;
+            }
+
+            if (!string.IsNullOrEmpty(toolResults))
+            {
+                history.Add(new ChatMessage("user", toolResults));
+                continue;
+            }
+        }
+
+        break;
+    }
 }

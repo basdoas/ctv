@@ -23,6 +23,12 @@ public sealed class AppConfig
         "You are ctv, a helpful and concise assistant living in the user's terminal.";
     public List<ProviderConfig> Providers { get; set; } = new();
 
+    // ── Safety ────────────────────────────────────────────────────────────────
+    /// <summary>When true every tool/file/shell action runs without prompting.</summary>
+    public bool AutoApprove { get; set; } = false;
+    /// <summary>Persistent action allow-list (key strings like "shell:ls -la" or "file:read").</summary>
+    public List<string> AllowedActions { get; set; } = new();
+
     public ProviderConfig? Active() =>
         Providers.FirstOrDefault(p => p.Id == ActiveProvider) ?? Providers.FirstOrDefault();
 }

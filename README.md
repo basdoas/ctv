@@ -22,8 +22,31 @@ On first start ctv walks you through adding a provider. Everything can be change
 | `/theme` | pick a theme (aurora, sunset, ocean, neon, mono) |
 | `/system` | edit the system prompt |
 | `/config` | show config file + providers |
-| `/clear` | clear conversation |
+| `/permissions` | view and manage safety allow-list & auto-approve |
+| `/clear` | clear conversation & session permissions |
 | `/quit` | exit (Ctrl+C stops a running answer) |
+
+## File & Terminal Access (Agentic)
+
+- **File Attachments**: Reference any file using `@path`, e.g.:
+  ```
+  @./src/Program.cs can you optimize this loop?
+  ```
+- **Shell Commands**: Execute local terminal commands with `!command`, optionally followed by two spaces and a question:
+  ```
+  !git status
+  !dotnet test  explain the failing test
+  ```
+
+## Safety & Permissions
+
+Every file read and shell execution is protected by a safety gate:
+1. **Allow once**: Run the action this one time.
+2. **Allow in this session**: Trust the action until ctv exits or `/clear`.
+3. **Always allow this action**: Persist this exact command or action to `~/.config/ctv/config.json`.
+4. **Always allow everything (auto-mode)**: Auto-approve all future actions.
+
+Use `/permissions` to inspect, edit, or reset your allow-list at any time.
 
 ## Providers
 
