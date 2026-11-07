@@ -30,6 +30,8 @@ public sealed class AppConfig
     public bool AutoApprove { get; set; } = false;
     /// <summary>Persistent action allow-list (key strings like "shell:ls -la" or "file:read").</summary>
     public List<string> AllowedActions { get; set; } = new();
+    /// <summary>MCP server configuration.</summary>
+    public McpConfig Mcp { get; set; } = new();
 
     public ProviderConfig? Active() =>
         Providers.FirstOrDefault(p => p.Id == ActiveProvider) ?? Providers.FirstOrDefault();
@@ -41,6 +43,9 @@ public sealed class AppConfig
 [JsonSerializable(typeof(List<string>))]
 [JsonSerializable(typeof(List<TodoItem>))]
 [JsonSerializable(typeof(List<PendingQuestion>))]
+[JsonSerializable(typeof(McpConfig))]
+[JsonSerializable(typeof(List<McpServerConfig>))]
+[JsonSerializable(typeof(ExtensionManifest))]
 internal partial class ConfigJson : JsonSerializerContext;
 
 public sealed record Preset(string Id, string Name, string Kind, string BaseUrl, string Model, string? KeyEnv);
@@ -95,8 +100,7 @@ public static class ConfigStore
     {
         Directory.CreateDirectory(Dir);
         File.WriteAllText(FilePath, JsonSerializer.Serialize(cfg, ConfigJson.Default.AppConfig));
-        if (!OperatingSystem.IsWindows())
-            File.SetUnixFileMode(FilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        Platform.SetOwnerReadWrite(FilePath);
     }
 
     public static string ResolveKey(ProviderConfig p) =>

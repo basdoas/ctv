@@ -1,3 +1,4 @@
+
 using System.Diagnostics;
 using System.Text;
 using Ctv;
@@ -21,9 +22,32 @@ if (Environment.GetEnvironmentVariable("NO_COLOR") is null)
 }
 
 var cfg = ConfigStore.Load();
+
+// --agent <name> CLI argument
+var cliArgs = Environment.GetCommandLineArgs();
+for (int i = 0; i < cliArgs.Length - 1; i++)
+{
+    if (cliArgs[i] == "--agent" && i + 1 < cliArgs.Length)
+    {
+        cfg.ActiveAgent = cliArgs[i + 1];
+        ConfigStore.Save(cfg);
+        break;
+    }
+}
+
 var history = new List<ChatMessage>();
+var current = Sessions.Load("current");
+if (current is not null)
+{
+    foreach (var m in current) history.Add(m);
+    Todos.Load("current");
+    Questions.Load("current");
+}
+
 var editor = new LineEditor();
 CancellationTokenSource? gen = null;
+var ui = new FullScreenUi(cfg);
+ui.Start();
 
 // Ctrl+C stops a running answer; when idle it exits normally.
 Console.CancelKeyPress += (_, e) =>
@@ -31,19 +55,17 @@ Console.CancelKeyPress += (_, e) =>
     if (gen is { } g) { e.Cancel = true; g.Cancel(); }
 };
 
-Ui.Banner(cfg);
 if (cfg.Providers.Count == 0)
 {
     AnsiConsole.MarkupLine("[yellow]No provider configured yet - let's add one.[/]");
     Commands.AddProvider(cfg);
+    ui.Refresh();
 }
 
 while (true)
 {
     var theme = Ui.Get(cfg);
     var active = cfg.Active();
-    AnsiConsole.MarkupLine($"\n[dim]{Markup.Escape(active?.Name ?? "no provider")} · {Markup.Escape(active?.Model ?? "-")}[/]");
-    AnsiConsole.Markup($"[bold {theme.AccentHex}]❯[/] ");
 
     var line = editor.ReadLine();
     if (line is null) break;
@@ -53,6 +75,7 @@ while (true)
     if (line.StartsWith('/'))
     {
         if (!Commands.Handle(line, cfg, history)) break;
+        ui.Refresh();
         continue;
     }
 
@@ -74,22 +97,24 @@ while (true)
         {
             await Send(prompt);
         }
+        ui.Refresh();
         continue;
     }
 
     var processed = FileAttachment.ProcessAttachments(line, cfg);
     if (processed is null) continue;
 
+    ui.AddUser(processed);
     await Send(processed);
 }
 
-AnsiConsole.MarkupLine("[dim]bye 👋[/]");
+ui.Stop();
 return;
 
 async Task Send(string text)
 {
     var pc = cfg.Active();
-    if (pc is null) { AnsiConsole.MarkupLine("[red]No active provider.[/] Use /login"); return; }
+    if (pc is null) { ui.AddSystem("[red]No active provider.[/] Use /login"); ui.Refresh(); return; }
 
     var theme = Ui.Get(cfg);
     history.Add(new ChatMessage("user", text));
@@ -98,15 +123,6 @@ async Task Send(string text)
     const int maxSteps = 8;
     for (int step = 0; step < maxSteps; step++)
     {
-        if (step == 0)
-        {
-            AnsiConsole.MarkupLine($"\n[bold {theme.AccentHex}]ctv[/]");
-        }
-        else
-        {
-            AnsiConsole.MarkupLine($"\n[bold {theme.AccentHex}]ctv[/] [dim](step {step + 1})[/]");
-        }
-
         var answer = new StringBuilder();
         var sw = Stopwatch.StartNew();
         gen = new CancellationTokenSource();
@@ -161,6 +177,31 @@ async Task Send(string text)
         }
 
         history.Add(new ChatMessage("assistant", fullAnswer));
+        Sessions.Save("current", history);
+        Todos.Save("current");
+
+        ui.AddAssistant(fullAnswer);
+
+        CodeBlocks.Parse(fullAnswer);
+        if (CodeBlocks.Last.Count > 0)
+        {
+            ui.AddSystem($"[dim]📦 {CodeBlocks.Last.Count} code block(s) detected. Use /expand <n> or /codeblocks[/]");
+        }
+
+        // ── Handle questions the AI wants to ask ──────────────────────────
+        var newQuestions = QuestionTools.ParseQuestions(fullAnswer);
+        foreach (var q in newQuestions)
+        {
+            Questions.Add(q);
+        }
+        Questions.Save("current");
+
+        if (newQuestions.Count > 0)
+        {
+            ui.AddSystem($"[dim]❓ {newQuestions.Count} question(s) awaiting your answer. Use /questions to answer.[/]");
+            // Don't continue the AI loop; wait for user to answer via /questions
+            break;
+        }
 
         if (AgentTools.HasToolCalls(fullAnswer))
         {
@@ -184,6 +225,11 @@ async Task Send(string text)
             if (!string.IsNullOrEmpty(toolResults))
             {
                 history.Add(new ChatMessage("user", toolResults));
+                Sessions.Save("current", history);
+                Todos.Save("current");
+                Questions.Save("current");
+                ui.AddSystem(toolResults);
+                ui.Refresh();
                 continue;
             }
         }

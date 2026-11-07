@@ -20,6 +20,8 @@ public static class SafetyGate
     // In-memory, cleared on /clear or process exit.
     static readonly HashSet<string> _sessionAllowed =
         new(StringComparer.OrdinalIgnoreCase);
+    static readonly HashSet<string> _turnAllowed =
+        new(StringComparer.OrdinalIgnoreCase);
     static bool _sessionAllowAll;
 
     // ── Action key helpers ─────────────────────────────────────────────────
@@ -38,7 +40,8 @@ public static class SafetyGate
         if (cfg.AutoApprove || _sessionAllowAll) return PermissionOutcome.Allow;
         if (cfg.AllowedActions.Contains(action, StringComparer.OrdinalIgnoreCase))
             return PermissionOutcome.Allow;
-        if (_sessionAllowed.Contains(action)) return PermissionOutcome.Allow;
+        if (_sessionAllowed.Contains(action) || _turnAllowed.Contains(action))
+            return PermissionOutcome.Allow;
 
         // Show the permission prompt.
         AnsiConsole.WriteLine();
@@ -98,9 +101,16 @@ public static class SafetyGate
     }
 
     // ── Session management ────────────────────────────────────────────────
+    /// <summary>Resets turn-scoped permissions at the start of an agent step.</summary>
+    public static void ResetTurn()
+    {
+        _turnAllowed.Clear();
+    }
+
     /// <summary>Drops all session-scoped permissions (called by /clear).</summary>
     public static void ClearSession()
     {
+        _turnAllowed.Clear();
         _sessionAllowed.Clear();
         _sessionAllowAll = false;
     }

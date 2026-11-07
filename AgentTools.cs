@@ -13,18 +13,19 @@ public static class AgentTools
     static readonly Regex EditFileRegex = new(@"<edit_file\s+path=[""'](?<path>[^""']+)[""']\s*>\s*<old>(?<old>.*?)</old>\s*<new>(?<new>.*?)</new>\s*</edit_file>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
 
     public static bool HasToolCalls(string text) =>
-        BashRegex.IsMatch(text) || ReadFileRegex.IsMatch(text) || WriteFileRegex.IsMatch(text) || EditFileRegex.IsMatch(text);
+        BashRegex.IsMatch(text) || ReadFileRegex.IsMatch(text) || WriteFileRegex.IsMatch(text) || EditFileRegex.IsMatch(text) || GitTools.HasGitCalls(text) || TodoTools.HasTodoCalls(text) || McpTools.HasMcpCalls(text);
 
     public static async Task<string?> ExecuteToolCallsAsync(string responseText, AppConfig cfg, CancellationToken ct)
     {
         if (!HasToolCalls(responseText)) return null;
 
+        SafetyGate.ResetTurn();
+
         var sb = new StringBuilder();
-        bool anyExecuted = false;
+        var results = new List<(string Type, string Detail, bool Ok)>();
 
         foreach (Match match in WriteFileRegex.Matches(responseText))
         {
-            anyExecuted = true;
             var rawPath = match.Groups["path"].Value.Trim();
             var content = match.Groups["content"].Value;
             var fullPath = PathResolver.Resolve(rawPath);
@@ -36,9 +37,7 @@ public static class AgentTools
 
             if (outcome == PermissionOutcome.Deny)
             {
-                sb.AppendLine($"[Tool Result: write_file path=\"{rawPath}\"]");
-                sb.AppendLine("Permission denied by user.");
-                sb.AppendLine();
+                results.Add(("write", rawPath, false));
                 continue;
             }
 
@@ -52,23 +51,17 @@ public static class AgentTools
 
                 await File.WriteAllTextAsync(fullPath, content, ct);
                 AnsiConsole.MarkupLine($"[green]✓ Created/Updated file:[/] [bold]{Markup.Escape(fullPath)}[/]");
-
-                sb.AppendLine($"[Tool Result: write_file path=\"{rawPath}\"]");
-                sb.AppendLine($"Success. File written to: {fullPath} ({content.Length} bytes)");
-                sb.AppendLine();
+                results.Add(("write", fullPath, true));
             }
             catch (Exception ex)
             {
                 AnsiConsole.MarkupLine($"[red]Error writing file:[/] {Markup.Escape(ex.Message)}");
-                sb.AppendLine($"[Tool Result: write_file path=\"{rawPath}\"]");
-                sb.AppendLine($"Error: {ex.Message}");
-                sb.AppendLine();
+                results.Add(("write", rawPath, false));
             }
         }
 
         foreach (Match match in EditFileRegex.Matches(responseText))
         {
-            anyExecuted = true;
             var rawPath = match.Groups["path"].Value.Trim();
             var oldText = match.Groups["old"].Value;
             var newText = match.Groups["new"].Value;
@@ -81,9 +74,7 @@ public static class AgentTools
 
             if (outcome == PermissionOutcome.Deny)
             {
-                sb.AppendLine($"[Tool Result: edit_file path=\"{rawPath}\"]");
-                sb.AppendLine("Permission denied by user.");
-                sb.AppendLine();
+                results.Add(("edit", rawPath, false));
                 continue;
             }
 
@@ -91,9 +82,7 @@ public static class AgentTools
             {
                 if (!File.Exists(fullPath))
                 {
-                    sb.AppendLine($"[Tool Result: edit_file path=\"{rawPath}\"]");
-                    sb.AppendLine($"File not found: {fullPath}");
-                    sb.AppendLine();
+                    results.Add(("edit", rawPath, false));
                     continue;
                 }
 
@@ -101,9 +90,7 @@ public static class AgentTools
                 int index = content.IndexOf(oldText);
                 if (index < 0)
                 {
-                    sb.AppendLine($"[Tool Result: edit_file path=\"{rawPath}\"]");
-                    sb.AppendLine("Error: search string not found in file.");
-                    sb.AppendLine();
+                    results.Add(("edit", rawPath, false));
                     continue;
                 }
 
@@ -122,23 +109,17 @@ public static class AgentTools
                 var result = content.Remove(index, oldText.Length).Insert(index, newText);
                 await File.WriteAllTextAsync(fullPath, result, ct);
                 AnsiConsole.MarkupLine($"[green]✓ Edited file:[/] [bold]{Markup.Escape(fullPath)}[/]");
-
-                sb.AppendLine($"[Tool Result: edit_file path=\"{rawPath}\"]");
-                sb.AppendLine($"Success. Replaced {oldText.Length} chars with {newText.Length} chars in: {fullPath}");
-                sb.AppendLine();
+                results.Add(("edit", fullPath, true));
             }
             catch (Exception ex)
             {
                 AnsiConsole.MarkupLine($"[red]Error editing file:[/] {Markup.Escape(ex.Message)}");
-                sb.AppendLine($"[Tool Result: edit_file path=\"{rawPath}\"]");
-                sb.AppendLine($"Error: {ex.Message}");
-                sb.AppendLine();
+                results.Add(("edit", rawPath, false));
             }
         }
 
         foreach (Match match in ReadFileRegex.Matches(responseText))
         {
-            anyExecuted = true;
             var rawPath = match.Groups["path"].Value.Trim();
             var fullPath = PathResolver.Resolve(rawPath);
 
@@ -149,9 +130,7 @@ public static class AgentTools
 
             if (outcome == PermissionOutcome.Deny)
             {
-                sb.AppendLine($"[Tool Result: read_file path=\"{rawPath}\"]");
-                sb.AppendLine("Permission denied by user.");
-                sb.AppendLine();
+                results.Add(("read", rawPath, false));
                 continue;
             }
 
@@ -159,9 +138,7 @@ public static class AgentTools
             {
                 if (!File.Exists(fullPath))
                 {
-                    sb.AppendLine($"[Tool Result: read_file path=\"{rawPath}\"]");
-                    sb.AppendLine($"File not found: {fullPath}");
-                    sb.AppendLine();
+                    results.Add(("read", rawPath, false));
                     continue;
                 }
 
@@ -170,6 +147,8 @@ public static class AgentTools
                 if (text.Length > maxChars) text = text[..maxChars] + "\n... [content truncated]";
 
                 AnsiConsole.MarkupLine($"[dim]✓ Read {Markup.Escape(fullPath)} ({text.Length} chars)[/]");
+                results.Add(("read", fullPath, true));
+
                 sb.AppendLine($"[Tool Result: read_file path=\"{rawPath}\"]");
                 sb.AppendLine("```");
                 sb.AppendLine(text);
@@ -179,18 +158,36 @@ public static class AgentTools
             catch (Exception ex)
             {
                 AnsiConsole.MarkupLine($"[red]Error reading file:[/] {Markup.Escape(ex.Message)}");
-                sb.AppendLine($"[Tool Result: read_file path=\"{rawPath}\"]");
-                sb.AppendLine($"Error: {ex.Message}");
-                sb.AppendLine();
+                results.Add(("read", rawPath, false));
             }
         }
 
         foreach (Match match in BashRegex.Matches(responseText))
         {
-            anyExecuted = true;
             var rawCmd = match.Groups[1].Value.Trim();
 
+            var (isDangerous, dangerReason) = SafetyPolicies.CheckShellCommand(rawCmd);
+            if (isDangerous)
+            {
+                SafetyPolicies.Audit("shell", $"BLOCKED dangerous command: {rawCmd}", false);
+                results.Add(("bash", rawCmd, false));
+                sb.AppendLine($"[Tool Result: bash command=\"{rawCmd}\"]");
+                sb.AppendLine($"Blocked: {dangerReason}");
+                sb.AppendLine();
+                continue;
+            }
+
             var (allowed, exitCode, output) = await ToolRunner.ExecuteCommandAsync(rawCmd, cfg, ct);
+
+            if (allowed)
+            {
+                AnsiConsole.MarkupLine($"[green]✓ Shell:[/] [bold]{Markup.Escape(rawCmd)}[/] (exit {exitCode})");
+                results.Add(("bash", rawCmd, true));
+            }
+            else
+            {
+                results.Add(("bash", rawCmd, false));
+            }
 
             sb.AppendLine($"[Tool Result: bash command=\"{rawCmd}\"]");
             if (!allowed)
@@ -208,6 +205,42 @@ public static class AgentTools
             sb.AppendLine();
         }
 
-        return anyExecuted ? sb.ToString() : null;
+        var gitResults = await GitTools.ExecuteGitCallsAsync(responseText, cfg, ct);
+        if (!string.IsNullOrEmpty(gitResults))
+        {
+            sb.Append(gitResults);
+        }
+
+        var todoResults = TodoTools.ExecuteTodoCalls(responseText);
+        if (!string.IsNullOrEmpty(todoResults))
+        {
+            sb.Append(todoResults);
+        }
+
+        var mcpResults = await McpTools.ExecuteMcpCallsAsync(responseText, cfg, ct);
+        if (!string.IsNullOrEmpty(mcpResults))
+        {
+            sb.Append(mcpResults);
+        }
+
+        var okCount = results.Count(r => r.Ok);
+        var failCount = results.Count(r => !r.Ok);
+        if (okCount > 0 || failCount > 0)
+        {
+            var summary = new StringBuilder();
+            summary.AppendLine("[Tool Result: summary]");
+            if (okCount > 0)
+                summary.AppendLine($"[green]✓ {okCount} action(s) completed[/]");
+            if (failCount > 0)
+                summary.AppendLine($"[red]✗ {failCount} action(s) failed or denied[/]");
+            summary.AppendLine();
+
+            var detailed = sb.ToString();
+            sb.Clear();
+            sb.Append(summary);
+            sb.Append(detailed);
+        }
+
+        return sb.Length > 0 ? sb.ToString() : null;
     }
 }

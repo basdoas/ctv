@@ -27,13 +27,13 @@ public static class Memories
     {
         if (!File.Exists(FilePath)) return new();
         var json = File.ReadAllText(FilePath);
-        return JsonSerializer.Deserialize<List<string>>(json) ?? new();
+        return JsonSerializer.Deserialize(json, ConfigJson.Default.ListString) ?? new();
     }
 
     public static void Save(List<string> memories)
     {
         Directory.CreateDirectory(Dir);
-        var json = JsonSerializer.Serialize(memories);
+        var json = JsonSerializer.Serialize(memories, ConfigJson.Default.ListString);
         File.WriteAllText(FilePath, json);
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(FilePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);

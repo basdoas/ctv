@@ -38,7 +38,7 @@ public static class Todos
         if (!File.Exists(PathFor(name))) return;
 
         var json = File.ReadAllText(PathFor(name));
-        var items = JsonSerializer.Deserialize<List<TodoItem>>(json) ?? new();
+        var items = JsonSerializer.Deserialize(json, ConfigJson.Default.ListTodoItem) ?? new();
         Current = items;
         _nextId = items.Count > 0 ? items.Max(x => x.Id) + 1 : 1;
     }
@@ -46,7 +46,7 @@ public static class Todos
     public static void Save(string name)
     {
         Directory.CreateDirectory(Dir);
-        var json = JsonSerializer.Serialize(Current, new JsonSerializerOptions { WriteIndented = true });
+        var json = JsonSerializer.Serialize(Current, ConfigJson.Default.ListTodoItem);
         File.WriteAllText(PathFor(name), json);
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(PathFor(name), UnixFileMode.UserRead | UnixFileMode.UserWrite);
