@@ -16,26 +16,60 @@ public sealed class LineEditor
         if (Console.IsInputRedirected) return Console.ReadLine();
 
         var buf = new StringBuilder();
-        int pos = 0, prevLen = 0, histIdx = history.Count;
+        int pos = 0, prevPos = 0, histIdx = history.Count;
         string draft = "";
-        int startLeft = Console.CursorLeft, startTop = Console.CursorTop;
+
+        // Flush any output still buffered by Spectre (or any other layer) so the prompt glyph
+        // is actually on-screen before we snapshot the cursor column.
+        Console.Out.Flush();
+        int startLeft = Console.CursorLeft; // column right after the prompt glyph (e.g. 2 for "❯ ")
+
+        // --- ANSI helpers (bypass Console.SetCursorPosition which can desync with Spectre) ---
+
+        // Move cursor to the logical start of the input field (column startLeft, same row).
+        // We use relative movement so we don't need to track the absolute row.
+        void GoToStart()
+        {
+            int w = Math.Max(1, Console.BufferWidth);
+            // After the previous Redraw the cursor was left at prevPos characters from startLeft.
+            // The number of rows it wrapped below the start row:
+            int rowsDown = (startLeft + prevPos) / w;
+            if (rowsDown > 0)
+                Console.Write($"\x1b[{rowsDown}A"); // cursor up
+            Console.Write("\r");                     // go to column 0
+            if (startLeft > 0)
+                Console.Write($"\x1b[{startLeft}C"); // go right to startLeft
+        }
+
+        // Place the cursor at logical edit position `pos` within the text,
+        // given that the text just written ends at character index `textLen` from startLeft.
+        void GoToPos(int textLen)
+        {
+            int w   = Math.Max(1, Console.BufferWidth);
+            int end = startLeft + textLen;
+            int cur = startLeft + pos;
+            // Row & column of end of text and desired cursor, relative to start row.
+            int endRow = end / w, endCol = end % w;
+            int curRow = cur / w, curCol = cur % w;
+            int rowDiff = endRow - curRow; // how many rows up we must go
+            if (rowDiff > 0) Console.Write($"\x1b[{rowDiff}A");
+            if (curCol < endCol) Console.Write($"\x1b[{endCol - curCol}D");
+            else if (curCol > endCol) Console.Write($"\x1b[{curCol - endCol}C");
+        }
 
         void Redraw()
         {
-            int w = Math.Max(1, Console.BufferWidth);
             string text = mask is { } m ? new string(m, buf.Length) : buf.ToString();
-            int total = Math.Max(text.Length, prevLen);
             try
             {
-                Console.SetCursorPosition(startLeft, startTop);
+                GoToStart();
+                // \x1b[J = erase from cursor to end of screen → wipes old text without needing spaces.
+                Console.Write("\x1b[J");
                 Console.Write(text);
-                if (prevLen > text.Length) Console.Write(new string(' ', prevLen - text.Length));
-                // The terminal may have scrolled while writing: re-derive where the input started.
-                startTop = Math.Max(0, Console.CursorTop - (startLeft + total) / w);
-                prevLen = text.Length;
-                Console.SetCursorPosition((startLeft + pos) % w, startTop + (startLeft + pos) / w);
+                GoToPos(text.Length);
+                prevPos = pos;
             }
-            catch (ArgumentOutOfRangeException) { /* odd terminal geometry: ignore this frame */ }
+            catch (Exception) { /* ignore on unusual terminals */ }
         }
 
         int WordStart(int p)
@@ -68,7 +102,7 @@ public sealed class LineEditor
         {
             var k = Console.ReadKey(intercept: true);
             bool ctrl = (k.Modifiers & ConsoleModifiers.Control) != 0;
-            bool alt = (k.Modifiers & ConsoleModifiers.Alt) != 0;
+            bool alt  = (k.Modifiers & ConsoleModifiers.Alt)     != 0;
 
             // Raw Backspace bytes: 0x7f (DEL) = delete char, 0x08 (^H, usually Ctrl+Backspace) = delete word.
             if (k.KeyChar == '\x7f')
@@ -87,6 +121,7 @@ public sealed class LineEditor
             switch (k.Key)
             {
                 case ConsoleKey.Enter:
+                    // Move cursor to end so the submitted text is fully visible, then newline.
                     pos = buf.Length;
                     Redraw();
                     Console.WriteLine();
@@ -139,7 +174,8 @@ public sealed class LineEditor
                 case ConsoleKey.Escape:
                     buf.Clear();
                     pos = 0;
-                    break;
+                    Redraw();
+                    continue; // already redrawn, skip the one at the bottom
 
                 case ConsoleKey.Tab:
                     break;
