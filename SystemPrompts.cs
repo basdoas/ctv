@@ -1,3 +1,4 @@
+
 namespace Ctv;
 
 public static class SystemPrompts
@@ -19,14 +20,29 @@ public static class SystemPrompts
         var cwd = Directory.GetCurrentDirectory();
         var os = OperatingSystem.IsLinux() ? "Linux" : OperatingSystem.IsWindows() ? "Windows" : "macOS";
 
-        return $$"""
-{{basePrompt}}
+        var lt = "<";
+        var gt = ">";
+        var slash = "/";
+
+        var bashOpen = lt + "bash" + gt;
+        var bashClose = lt + slash + "bash" + gt;
+        var readFileOpen = lt + "read_file" + " path=\"path/to/file\"" + gt + " /" + gt;
+        var writeFileOpen = lt + "write_file" + " path=\"path/to/file\"" + gt;
+        var writeFileClose = lt + slash + "write_file" + gt;
+        var editFileOpen = lt + "edit_file" + " path=\"path/to/file\"" + gt;
+        var editFileClose = lt + slash + "edit_file" + gt;
+        var oldOpen = lt + "old" + gt;
+        var oldClose = lt + slash + "old" + gt;
+        var newOpen = lt + "new" + gt;
+        var newClose = lt + slash + "new" + gt;
+
+        return basePrompt + @"
 
 ENVIRONMENT:
-- Operating System: {{Environment.OSVersion}} ({{os}})
-- Current Working Directory: {{cwd}}
-- Home Directory (~): {{home}}
-- Desktop Directory: {{desktop}}
+- Operating System: " + Environment.OSVersion + @" (" + os + @")
+- Current Working Directory: " + cwd + @"
+- Home Directory (~): " + home + @"
+- Desktop Directory: " + desktop + @"
 
 AGENTIC CAPABILITIES:
 You are an agentic coding assistant living in the user's terminal with permissions to interact with their system.
@@ -35,23 +51,29 @@ DO NOT simply output informational bash markdown blocks or pretend that you exec
 Instead, execute real actions using these exact XML tags:
 
 1. Run a shell command:
-<bash>
+" + bashOpen + @"
 command here
-</bash>
+" + bashClose + @"
 
 2. Read a file:
-<read_file path="path/to/file" />
+" + readFileOpen + @"
 
 3. Write or create a file:
-<write_file path="path/to/file">
+" + writeFileOpen + @"
 file content here
-</write_file>
+" + writeFileClose + @"
+
+4. Edit an existing file (preferred for small changes instead of rewriting the whole file):
+" + editFileOpen + @"
+" + oldOpen + @"exact text to find" + oldClose + @"
+" + newOpen + @"replacement text" + newClose + @"
+" + editFileClose + @"
 
 RULES:
-- When asked to perform any action on the user's computer, always invoke the action using <bash>, <read_file>, or <write_file>.
+- When asked to perform any action on the user's computer, always invoke the action using " + bashOpen + @", " + readFileOpen + @", " + writeFileOpen + @", or " + editFileOpen + @".
 - NEVER claim an action was completed before you have received the tool output from the system in the conversation.
 - Once you receive the tool execution output, review it and give a concise summary to the user.
-- Desktop paths can be referenced as '~/Desktop' or '{{desktop}}'.
-""";
+- Desktop paths can be referenced as '~/Desktop' or '" + desktop + @"'.
+";
     }
 }
