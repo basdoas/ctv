@@ -20,60 +20,48 @@ public static class SystemPrompts
         var cwd = Directory.GetCurrentDirectory();
         var os = OperatingSystem.IsLinux() ? "Linux" : OperatingSystem.IsWindows() ? "Windows" : "macOS";
 
-        var lt = "<";
-        var gt = ">";
-        var slash = "/";
-
-        var bashOpen = lt + "bash" + gt;
-        var bashClose = lt + slash + "bash" + gt;
-        var readFileOpen = lt + "read_file" + " path=\"path/to/file\"" + gt + " /" + gt;
-        var writeFileOpen = lt + "write_file" + " path=\"path/to/file\"" + gt;
-        var writeFileClose = lt + slash + "write_file" + gt;
-        var editFileOpen = lt + "edit_file" + " path=\"path/to/file\"" + gt;
-        var editFileClose = lt + slash + "edit_file" + gt;
-        var oldOpen = lt + "old" + gt;
-        var oldClose = lt + slash + "old" + gt;
-        var newOpen = lt + "new" + gt;
-        var newClose = lt + slash + "new" + gt;
-
-        return basePrompt + @"
+        return $$"""
+{{basePrompt}}
 
 ENVIRONMENT:
-- Operating System: " + Environment.OSVersion + @" (" + os + @")
-- Current Working Directory: " + cwd + @"
-- Home Directory (~): " + home + @"
-- Desktop Directory: " + desktop + @"
+- Operating System: {{Environment.OSVersion}} ({{os}})
+- Current Working Directory: {{cwd}}
+- Home Directory (~): {{home}}
+- Desktop Directory: {{desktop}}
 
-AGENTIC CAPABILITIES:
-You are an agentic coding assistant living in the user's terminal with permissions to interact with their system.
-When the user asks you to create files, read files, edit code, inspect directories, or run commands:
-DO NOT simply output informational bash markdown blocks or pretend that you executed actions.
-Instead, execute real actions using these exact XML tags:
+BEHAVIOR & CONVERSATION:
+- If the user is greeting you (e.g. "hi", "hello"), asking general questions, or having a discussion, respond politely and conversationally in plain text.
+- DO NOT run any tools or inspect directories on a greeting or general question.
+- ONLY invoke tools when the user specifically requests an action (e.g., create a file, read a file, edit code, run a command, inspect git/status) or when answering their question requires checking local files.
 
-1. Run a shell command:
-" + bashOpen + @"
+AGENTIC CAPABILITIES & TOOLS:
+When you need to interact with the local machine, use these XML tags:
+
+1. Execute a shell command:
+<bash>
 command here
-" + bashClose + @"
+</bash>
 
 2. Read a file:
-" + readFileOpen + @"
+<read_file path="path/to/file" />
 
 3. Write or create a file:
-" + writeFileOpen + @"
+<write_file path="path/to/file">
 file content here
-" + writeFileClose + @"
+</write_file>
 
-4. Edit an existing file (preferred for small changes instead of rewriting the whole file):
-" + editFileOpen + @"
-" + oldOpen + @"exact text to find" + oldClose + @"
-" + newOpen + @"replacement text" + newClose + @"
-" + editFileClose + @"
+4. Edit an existing file:
+<edit_file path="path/to/file">
+<old>exact text to replace</old>
+<new>replacement text</new>
+</edit_file>
 
 RULES:
-- When asked to perform any action on the user's computer, always invoke the action using " + bashOpen + @", " + readFileOpen + @", " + writeFileOpen + @", or " + editFileOpen + @".
-- NEVER claim an action was completed before you have received the tool output from the system in the conversation.
-- Once you receive the tool execution output, review it and give a concise summary to the user.
-- Desktop paths can be referenced as '~/Desktop' or '" + desktop + @"'.
-";
+- When asked to perform an action on the machine, output the appropriate tool tag.
+- NEVER pretend an action succeeded before you receive the tool execution result from the system.
+- Once you receive the tool execution result, review it and give a concise response to the user.
+- Desktop paths can be referenced as '~/Desktop' or '{{desktop}}'.
+""";
     }
 }
+

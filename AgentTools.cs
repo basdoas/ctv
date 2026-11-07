@@ -7,10 +7,10 @@ namespace Ctv;
 
 public static class AgentTools
 {
-    static readonly Regex BashRegex = new("\x3Cbash\x3E\\s*(.*?)\\s*\x3C/bash\x3E", RegexOptions.Singleline | RegexOptions.IgnoreCase);
-    static readonly Regex ReadFileRegex = new("\x3Cread_file\\s+path=[\"'](?<path>[^\"']+)[\"']\\s*/?\x3E|\x3Cread_file\x3E(?<path>.*?)\x3C/read_file\x3E", RegexOptions.Singleline | RegexOptions.IgnoreCase);
-    static readonly Regex WriteFileRegex = new("\x3Cwrite_file\\s+path=[\"'](?<path>[^\"']+)[\"']\\s*\x3E(?<content>.*?)\x3C/write_file\x3E", RegexOptions.Singleline | RegexOptions.IgnoreCase);
-    static readonly Regex EditFileRegex = new("\x3Cedit_file\\s+path=[\"'](?<path>[^\"']+)[\"']\\s*\x3E\\s*\x3Cold\x3E(?<old>.*?)\x3C/old\x3E\\s*\x3Cnew\x3E(?<new>.*?)\x3C/new\x3E\\s*\x3C/edit_file\x3E", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    static readonly Regex BashRegex = new(@"<bash>\s*(.*?)\s*</bash>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    static readonly Regex ReadFileRegex = new(@"<read_file\s+path=[""'](?<path>[^""']+)[""']\s*/?>|<read_file>(?<path>.*?)</read_file>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    static readonly Regex WriteFileRegex = new(@"<write_file\s+path=[""'](?<path>[^""']+)[""']\s*>(?<content>.*?)</write_file>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    static readonly Regex EditFileRegex = new(@"<edit_file\s+path=[""'](?<path>[^""']+)[""']\s*>\s*<old>(?<old>.*?)</old>\s*<new>(?<new>.*?)</new>\s*</edit_file>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
 
     public static bool HasToolCalls(string text) =>
         BashRegex.IsMatch(text) || ReadFileRegex.IsMatch(text) || WriteFileRegex.IsMatch(text) || EditFileRegex.IsMatch(text);

@@ -39,6 +39,8 @@ public static class Sessions
         if (!Directory.Exists(Dir)) return new();
         return Directory.GetFiles(Dir, "*.json")
             .Select(Path.GetFileNameWithoutExtension)
+            .Where(x => !string.IsNullOrEmpty(x))
+            .Select(x => x!)
             .OrderByDescending(x => File.GetLastWriteTimeUtc(PathFor(x)))
             .ToList();
     }

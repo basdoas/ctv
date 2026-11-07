@@ -89,6 +89,10 @@ public static class Commands
                 Ui.Banner(cfg);
                 break;
 
+            case "/permissions":
+                ShowPermissions(cfg);
+                break;
+
             case "/save":
                 {
                     if (string.IsNullOrWhiteSpace(arg))
