@@ -7,12 +7,16 @@ namespace Ctv;
 
 /// <summary>
 /// Full-screen, user-friendly terminal GUI inspired by mistral-vibe.
+/// Uses fixed ANSI screen-coordinate positioning (\x1b[{row};{col}H) in alternate buffer.
 /// Layout:
-/// - Rows 0..1: Top Header (Logo, model pill, branch, folder)
-/// - Rows 2..(H-6): Scrollable transcript viewport
-/// - Rows (H-5)..(H-2): Bottom pinned prompt composer box
-/// - Rows (H-2): Status footer bar
-/// Keystrokes only update the bottom prompt line, NEVER printing duplicate boxes.
+/// - Row 1: Top header (Brand, Model pill, git branch, current folder)
+/// - Row 2: Divider line
+/// - Rows 3..(H-4): Transcript area (scrollable message history)
+/// - Row (H-3): Prompt box top border ╭─ Prompt ... ╮
+/// - Row (H-2): Prompt input line │ ❯ text ... │ (updated IN-PLACE on keystrokes)
+/// - Row (H-1): Prompt box bottom border ╰───────────╯
+/// - Row H: Status footer bar
+/// Keystrokes NEVER scroll the screen or print duplicate boxes.
 /// </summary>
 public static class VibeScreen
 {
@@ -24,7 +28,8 @@ public static class VibeScreen
     public static void EnterAltScreen()
     {
         if (_altScreenActive) return;
-        Console.Write("\x1b[?1049h\x1b[2J\x1b[H"); // alternate screen, clear, home
+        // Enter alternate screen, clear, home cursor, hide cursor temporarily
+        Console.Write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25h");
         Console.Out.Flush();
         _altScreenActive = true;
     }
@@ -32,7 +37,8 @@ public static class VibeScreen
     public static void ExitAltScreen()
     {
         if (!_altScreenActive) return;
-        Console.Write("\x1b[?1049l\x1b[?25h"); // restore main screen & show cursor
+        // Exit alternate screen & show cursor
+        Console.Write("\x1b[?1049l\x1b[?25h");
         Console.Out.Flush();
         _altScreenActive = false;
     }
@@ -63,84 +69,103 @@ public static class VibeScreen
     public static void AddMessage(ChatMessage m, AppConfig cfg)
     {
         var theme = Ui.Get(cfg);
-        var accent = theme.AccentHex;
-        int maxW = Math.Max(30, Console.WindowWidth - 6);
+        int maxW = Math.Max(20, Console.WindowWidth - 6);
+
+        string accent = $"\x1b[38;2;{theme.From.R};{theme.From.G};{theme.From.B}m";
+        const string cyan = "\x1b[36;1m";
+        const string reset = "\x1b[0m";
+        const string dim = "\x1b[2m";
+        const string bold = "\x1b[1m";
 
         if (m.Role == "user")
         {
             TranscriptLines.Add("");
-            TranscriptLines.Add($"[bold cyan]❯ You[/]");
-            foreach (var line in WrapText(m.Content, maxW))
+            TranscriptLines.Add($"{cyan}❯ You{reset}");
+            foreach (var line in WrapPlain(m.Content, maxW))
             {
-                TranscriptLines.Add($"  [white]{Markup.Escape(line)}[/]");
+                TranscriptLines.Add($"  {line}");
             }
         }
         else if (m.Role == "assistant")
         {
             TranscriptLines.Add("");
-            TranscriptLines.Add($"[bold {accent}]✦ ctv[/]");
-            FormatAssistantTranscript(m.Content, maxW, accent);
+            TranscriptLines.Add($"{accent}{bold}✦ ctv{reset}");
+            FormatAssistantLines(m.Content, maxW, accent);
         }
         else
         {
             TranscriptLines.Add("");
-            TranscriptLines.Add($"[dim]ℹ {Markup.Escape(m.Content)}[/]");
+            TranscriptLines.Add($"{dim}ℹ {m.Content}{reset}");
         }
     }
 
-    public static void AddToolResult(string title, string content, bool success, AppConfig cfg)
+    static void FormatAssistantLines(string content, int maxW, string accent)
     {
-        int maxW = Math.Max(30, Console.WindowWidth - 8);
-        var color = success ? "green" : "red";
-        var icon = success ? "✓" : "✗";
+        const string reset = "\x1b[0m";
+        const string dim = "\x1b[2m";
+        const string yellow = "\x1b[33m";
+        const string green = "\x1b[32m";
+        const string blue = "\x1b[34m";
 
-        TranscriptLines.Add("");
-        TranscriptLines.Add($"  [{color}]╭─ {icon} {Markup.Escape(title)} ─[/]");
-        foreach (var line in WrapText(content, maxW))
-        {
-            TranscriptLines.Add($"  [{color}]│[/] [dim]{Markup.Escape(line)}[/]");
-        }
-        TranscriptLines.Add($"  [{color}]╰───[/]");
-    }
-
-    static void FormatAssistantTranscript(string content, int maxW, string accent)
-    {
-        var lines = content.Split('\n');
+        var rawLines = content.Split('\n');
         bool inCode = false;
 
-        foreach (var rawLine in lines)
+        foreach (var raw in rawLines)
         {
-            var line = rawLine.TrimEnd('\r');
+            var line = raw.TrimEnd('\r');
             if (line.StartsWith("```"))
             {
                 inCode = !inCode;
-                TranscriptLines.Add($"  [dim]{Markup.Escape(line)}[/]");
+                TranscriptLines.Add($"  {dim}{line}{reset}");
                 continue;
             }
 
             if (inCode)
             {
-                TranscriptLines.Add($"  [dim]│[/] {Markup.Escape(line)}");
+                TranscriptLines.Add($"  {dim}│{reset} {line}");
+                continue;
+            }
+
+            if (line.StartsWith("[Tool Result: bash") || line.StartsWith("<bash>"))
+            {
+                TranscriptLines.Add($"  {yellow}╭─ ⚙ Shell Action ─{reset}");
+                TranscriptLines.Add($"  {yellow}│{reset} {dim}{line}{reset}");
+                TranscriptLines.Add($"  {yellow}╰───{reset}");
+                continue;
+            }
+
+            if (line.StartsWith("[Tool Result: write_file") || line.StartsWith("<write_file"))
+            {
+                TranscriptLines.Add($"  {green}╭─ ✏ File Write ─{reset}");
+                TranscriptLines.Add($"  {green}│{reset} {dim}{line}{reset}");
+                TranscriptLines.Add($"  {green}╰───{reset}");
+                continue;
+            }
+
+            if (line.StartsWith("[Tool Result: read_file") || line.StartsWith("<read_file"))
+            {
+                TranscriptLines.Add($"  {blue}╭─ 📖 File Read ─{reset}");
+                TranscriptLines.Add($"  {blue}│{reset} {dim}{line}{reset}");
+                TranscriptLines.Add($"  {blue}╰───{reset}");
+                continue;
+            }
+
+            var wrapped = WrapPlain(line, maxW);
+            if (wrapped.Count == 0)
+            {
+                TranscriptLines.Add("");
             }
             else
             {
-                var wrapped = WrapText(line, maxW);
-                if (wrapped.Count == 0)
+                foreach (var w in wrapped)
                 {
-                    TranscriptLines.Add("");
-                }
-                else
-                {
-                    foreach (var w in wrapped)
-                    {
-                        TranscriptLines.Add($"  {Markup.Escape(w)}");
-                    }
+                    TranscriptLines.Add($"  {w}");
                 }
             }
         }
     }
 
-    static List<string> WrapText(string text, int maxWidth)
+    static List<string> WrapPlain(string text, int maxWidth)
     {
         var list = new List<string>();
         if (string.IsNullOrEmpty(text)) return list;
@@ -156,158 +181,139 @@ public static class VibeScreen
         return list;
     }
 
-    // ── Full-Screen Rendering ──────────────────────────────────────────────
+    // ── Full Screen Redraw ──────────────────────────────────────────────────
     public static void RedrawScreen(AppConfig cfg, string promptText = "", int cursor = 0, string? status = null)
     {
         int W = Math.Max(40, Console.WindowWidth);
         int H = Math.Max(12, Console.WindowHeight);
 
         var theme = Ui.Get(cfg);
-        var accent = theme.AccentHex;
-        var active = cfg.Active();
+        string accent = $"\x1b[38;2;{theme.From.R};{theme.From.G};{theme.From.B}m";
+        const string reset = "\x1b[0m";
+        const string dim = "\x1b[2m";
+        const string bold = "\x1b[1m";
 
-        // 1. Clear screen and home cursor
-        Console.Write("\x1b[2J\x1b[H");
+        var sb = new StringBuilder();
 
-        // 2. Render Header (Rows 0 and 1)
+        // 1. Clear screen & home cursor
+        sb.Append("\x1b[2J\x1b[1;1H");
+
+        // 2. Row 1: Header bar
         var branch = GetGitBranch();
         var branchText = !string.IsNullOrEmpty(branch) ? $"  {branch}" : "";
         var cwdName = Path.GetFileName(Directory.GetCurrentDirectory());
-
+        var active = cfg.Active();
         var modelName = active is not null ? active.Model ?? active.Name : "no-provider";
-        var leftHeader = $" ctv · cool terminal vibe";
+
+        var leftHeader = " ctv · cool terminal vibe";
         var rightHeader = $"{modelName}{branchText} 📁 {cwdName} ";
+        int spaceCount = Math.Max(1, W - leftHeader.Length - rightHeader.Length);
 
-        var spaceCount = Math.Max(1, W - leftHeader.Length - rightHeader.Length);
-        var headerLine = $"[bold {accent}]{leftHeader}[/]" + new string(' ', spaceCount) + $"[dim]{Markup.Escape(rightHeader)}[/]";
-        AnsiConsole.MarkupLine(headerLine);
+        sb.Append($"\x1b[1;1H\x1b[2K{accent}{bold}{leftHeader}{reset}{new string(' ', spaceCount)}{dim}{rightHeader}{reset}");
 
-        var div = new string('─', W);
-        AnsiConsole.MarkupLine($"[{accent}]{div}[/]");
+        // Row 2: Divider
+        sb.Append($"\x1b[2;1H\x1b[2K{accent}{new string('─', W)}{reset}");
 
-        // 3. Render Transcript (Rows 2 .. H-6)
-        int transcriptHeight = Math.Max(1, H - 7);
+        // 3. Rows 3..(H-4): Transcript
+        int transcriptHeight = Math.Max(1, H - 6);
         var visibleLines = TranscriptLines.Count > transcriptHeight
-            ? TranscriptLines.Skip(TranscriptLines.Count - transcriptHeight).Take(transcriptHeight)
+            ? TranscriptLines.Skip(TranscriptLines.Count - transcriptHeight).Take(transcriptHeight).ToList()
             : TranscriptLines;
 
-        int writtenRows = 0;
-        foreach (var l in visibleLines)
+        for (int i = 0; i < transcriptHeight; i++)
         {
-            try { AnsiConsole.MarkupLine(l); }
-            catch { Console.WriteLine(l); }
-            writtenRows++;
+            int row = 3 + i;
+            if (i < visibleLines.Count)
+            {
+                sb.Append($"\x1b[{row};1H\x1b[2K{visibleLines[i]}");
+            }
+            else
+            {
+                sb.Append($"\x1b[{row};1H\x1b[2K");
+            }
         }
 
-        // Fill empty transcript rows
-        while (writtenRows < transcriptHeight)
-        {
-            Console.WriteLine();
-            writtenRows++;
-        }
-
-        // 4. Render Composer Box at bottom (Rows H-5 .. H-2)
-        RenderPromptBox(cfg, promptText, cursor, status);
-    }
-
-    public static void RenderPromptBox(AppConfig cfg, string promptText, int cursor, string? status = null)
-    {
-        int W = Math.Max(40, Console.WindowWidth);
-        int H = Math.Max(12, Console.WindowHeight);
-
-        var theme = Ui.Get(cfg);
-        var accent = theme.AccentHex;
-
-        int boxTopRow = H - 5;
-        try { Console.SetCursorPosition(0, Math.Max(0, boxTopRow)); }
-        catch { }
-
-        // Top border with title & hint
+        // 4. Row H-3: Prompt top border
+        int topRow = H - 3;
         var title = " Prompt (@ file · ! shell · / cmd) ";
-        var topDashCount = Math.Max(1, W - 3 - title.Length);
-        AnsiConsole.MarkupLine($"[{accent}]╭─[/][bold {accent}]{Markup.Escape(title)}[/][{accent}]{new string('─', topDashCount)}╮[/]");
+        int topDash = Math.Max(1, W - 2 - title.Length);
+        sb.Append($"\x1b[{topRow};1H\x1b[2K{accent}╭─{bold}{title}{reset}{accent}{new string('─', topDash)}╮{reset}");
 
-        // Input row
+        // Row H-2: Prompt line
+        int inputRow = H - 2;
         int innerW = Math.Max(10, W - 6);
-        string visibleText = promptText.Length > innerW
-            ? promptText[(promptText.Length - innerW)..]
-            : promptText;
-
-        var textLine = !string.IsNullOrEmpty(status)
-            ? $"[{accent}]│[/] [bold {accent}]❯[/] [yellow]{Markup.Escape(status)}[/]"
-            : string.IsNullOrEmpty(promptText)
-                ? $"[{accent}]│[/] [bold {accent}]❯[/] [dim]Type a message or command...[/]"
-                : $"[{accent}]│[/] [bold {accent}]❯[/] [white]{Markup.Escape(visibleText)}[/]";
-
-        // Clear row to edge
-        Console.Write("\x1b[2K");
-        try { AnsiConsole.Markup(textLine); }
-        catch { Console.Write($"│ ❯ {visibleText}"); }
-
-        // Move to right edge and draw border
-        try
+        string visibleText;
+        if (!string.IsNullOrEmpty(status))
         {
-            Console.SetCursorPosition(W - 1, Console.CursorTop);
-            AnsiConsole.MarkupLine($"[{accent}]│[/]");
+            visibleText = $"\x1b[33m{status}\x1b[0m";
+            int pad = Math.Max(0, innerW - status.Length);
+            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {visibleText}{new string(' ', pad)}{accent}│{reset}");
         }
-        catch { Console.WriteLine(); }
+        else if (string.IsNullOrEmpty(promptText))
+        {
+            int pad = Math.Max(0, innerW - 27);
+            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {dim}Type a message or command...{reset}{new string(' ', pad)}{accent}│{reset}");
+        }
+        else
+        {
+            string displayed = promptText.Length > innerW ? promptText[^innerW..] : promptText;
+            int pad = Math.Max(0, innerW - displayed.Length);
+            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {displayed}{new string(' ', pad)}{accent}│{reset}");
+        }
 
-        // Bottom border
-        var bottomDashCount = Math.Max(1, W - 2);
-        AnsiConsole.MarkupLine($"[{accent}]╰{new string('─', bottomDashCount)}╯[/]");
+        // Row H-1: Prompt bottom border
+        int bottomRow = H - 1;
+        sb.Append($"\x1b[{bottomRow};1H\x1b[2K{accent}╰{new string('─', W - 2)}╯{reset}");
 
-        // Footer status bar
-        var autoStatus = cfg.AutoApprove ? "[green]auto-approve: on[/]" : "[dim]auto-approve: off[/]";
-        var footer = $" [dim]Enter Send · Shift+Enter Newline · Tab Complete · Ctrl+C Exit[/]   [dim]|[/]   {autoStatus}";
-        Console.Write("\x1b[2K");
-        try { AnsiConsole.MarkupLine(footer); }
-        catch { Console.WriteLine(footer); }
+        // Row H: Footer bar
+        var autoStatus = cfg.AutoApprove ? "\x1b[32mauto-approve: on\x1b[0m" : $"{dim}auto-approve: off{reset}";
+        var footer = $" {dim}Enter Send · Shift+Enter Newline · Tab Complete · Ctrl+C Exit{reset}   {dim}|{reset}   {autoStatus}";
+        sb.Append($"\x1b[{H};1H\x1b[2K{footer}");
 
-        // Position hardware cursor inside the prompt box
-        int cursorCol = Math.Min(W - 3, 4 + (promptText.Length > innerW ? innerW : cursor));
-        try { Console.SetCursorPosition(cursorCol, Math.Max(0, boxTopRow + 1)); }
-        catch { }
+        // Position cursor inside prompt box
+        int cursorCol = Math.Min(W - 2, 5 + (promptText.Length > innerW ? innerW : cursor));
+        sb.Append($"\x1b[{inputRow};{cursorCol}H");
+
+        Console.Write(sb.ToString());
+        Console.Out.Flush();
     }
 
-    // ── Single-Line Keystroke Fast Update ──────────────────────────────────
+    // ── Fast In-Place Keystroke Update (Row H-2 Only) ───────────────────────
     private static void UpdatePromptOnly(AppConfig cfg, string promptText, int cursor)
     {
         int W = Math.Max(40, Console.WindowWidth);
         int H = Math.Max(12, Console.WindowHeight);
+
         var theme = Ui.Get(cfg);
-        var accent = theme.AccentHex;
+        string accent = $"\x1b[38;2;{theme.From.R};{theme.From.G};{theme.From.B}m";
+        const string reset = "\x1b[0m";
+        const string dim = "\x1b[2m";
+        const string bold = "\x1b[1m";
 
-        int row = H - 4; // Input line row
-        try { Console.SetCursorPosition(0, Math.Max(0, row)); }
-        catch { return; }
-
+        int inputRow = H - 2;
         int innerW = Math.Max(10, W - 6);
-        string visibleText = promptText.Length > innerW
-            ? promptText[(promptText.Length - innerW)..]
-            : promptText;
 
-        Console.Write("\x1b[2K"); // Erase this single line
-        var textLine = string.IsNullOrEmpty(promptText)
-            ? $"[{accent}]│[/] [bold {accent}]❯[/] [dim]Type a message or command...[/]"
-            : $"[{accent}]│[/] [bold {accent}]❯[/] [white]{Markup.Escape(visibleText)}[/]";
-
-        try { AnsiConsole.Markup(textLine); }
-        catch { Console.Write($"│ ❯ {visibleText}"); }
-
-        try
+        var sb = new StringBuilder();
+        if (string.IsNullOrEmpty(promptText))
         {
-            Console.SetCursorPosition(W - 1, row);
-            AnsiConsole.Markup($"[{accent}]│[/]");
+            int pad = Math.Max(0, innerW - 27);
+            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {dim}Type a message or command...{reset}{new string(' ', pad)}{accent}│{reset}");
         }
-        catch { }
+        else
+        {
+            string displayed = promptText.Length > innerW ? promptText[^innerW..] : promptText;
+            int pad = Math.Max(0, innerW - displayed.Length);
+            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {displayed}{new string(' ', pad)}{accent}│{reset}");
+        }
 
-        // Move cursor to typing point
-        int cursorCol = Math.Min(W - 3, 4 + (promptText.Length > innerW ? innerW : cursor));
-        try { Console.SetCursorPosition(cursorCol, row); }
-        catch { }
+        int cursorCol = Math.Min(W - 2, 5 + (promptText.Length > innerW ? innerW : cursor));
+        sb.Append($"\x1b[{inputRow};{cursorCol}H");
+
+        Console.Write(sb.ToString());
+        Console.Out.Flush();
     }
 
-    // ── Interactive Composer ───────────────────────────────────────────────
+    // ── Interactive Composer Loop ──────────────────────────────────────────
     public static string? ReadComposer(AppConfig cfg)
     {
         var buf = new StringBuilder();
@@ -325,12 +331,11 @@ public static class VibeScreen
             "/clear", "/quit"
         };
 
-        // Render full screen once at the start of composer
+        // Initial full render
         RedrawScreen(cfg, buf.ToString(), cursor);
 
         while (true)
         {
-            // Detect window resize
             if (Console.WindowWidth != lastW || Console.WindowHeight != lastH)
             {
                 lastW = Console.WindowWidth;
@@ -364,7 +369,7 @@ public static class VibeScreen
 
             if (k.Key == ConsoleKey.C && ctrl)
             {
-                return null; // Cancel / exit
+                return null;
             }
 
             if (k.Key == ConsoleKey.D && ctrl)
@@ -518,28 +523,31 @@ public static class VibeScreen
         int W = Math.Max(40, Console.WindowWidth);
         int H = Math.Max(12, Console.WindowHeight);
 
-        // Position modal in lower half above prompt
-        int modalRow = Math.Max(2, H - 14);
-        try { Console.SetCursorPosition(0, modalRow); }
-        catch { }
+        var theme = Ui.Get(cfg);
+        string accent = $"\x1b[38;2;{theme.From.R};{theme.From.G};{theme.From.B}m";
+        const string reset = "\x1b[0m";
+        const string bold = "\x1b[1m";
+        const string cyan = "\x1b[36m";
+        const string yellow = "\x1b[33m";
+        const string red = "\x1b[31m";
+        const string dim = "\x1b[2m";
 
-        var content = new StringBuilder();
-        content.AppendLine($"[bold yellow]Target:[/] {Markup.Escape(label)}");
-        content.AppendLine();
-        content.AppendLine("  [bold cyan]1[/]. Allow once");
-        content.AppendLine("  [bold cyan]2[/]. Allow for remainder of this session");
-        content.AppendLine("  [bold cyan]3[/]. Always allow this action");
-        content.AppendLine("  [bold cyan]4[/]. Always allow everything (auto-mode)");
-        content.AppendLine("  [bold red]5[/]. Deny");
-        content.AppendLine();
-        content.AppendLine("[dim]Press [1-5] for quick select, or Esc to reject[/]");
+        int startRow = Math.Max(3, H / 2 - 4);
+        int modalW = Math.Min(W - 4, 70);
 
-        var modal = new Panel(new Markup(content.ToString()))
-            .Header("[bold yellow]⚠ Tool Approval Required[/]")
-            .Border(BoxBorder.Rounded)
-            .BorderStyle(Style.Parse("yellow"));
+        string Trunc(string s, int max) => s.Length > max ? s[..(max - 3)] + "..." : s;
 
-        AnsiConsole.Write(modal);
+        var sb = new StringBuilder();
+        sb.Append($"\x1b[{startRow};2H\x1b[2K{yellow}╭─ ⚠ Tool Approval Required {new string('─', Math.Max(1, modalW - 29))}╮{reset}");
+        sb.Append($"\x1b[{startRow + 1};2H\x1b[2K{yellow}│{reset} Target: {bold}{Trunc(label, modalW - 12)}{reset}");
+        sb.Append($"\x1b[{startRow + 2};2H\x1b[2K{yellow}│{reset}   {cyan}1{reset}. Allow once          {cyan}2{reset}. Allow for session");
+        sb.Append($"\x1b[{startRow + 3};2H\x1b[2K{yellow}│{reset}   {cyan}3{reset}. Always allow        {cyan}4{reset}. Auto-mode (all)");
+        sb.Append($"\x1b[{startRow + 4};2H\x1b[2K{yellow}│{reset}   {red}5{reset}. Deny");
+        sb.Append($"\x1b[{startRow + 5};2H\x1b[2K{yellow}│{reset} {dim}[1-5] Choose option    [Esc] Deny{reset}");
+        sb.Append($"\x1b[{startRow + 6};2H\x1b[2K{yellow}╰{new string('─', modalW - 2)}╯{reset}");
+
+        Console.Write(sb.ToString());
+        Console.Out.Flush();
 
         PermissionOutcome outcome;
         while (true)
@@ -580,7 +588,6 @@ public static class VibeScreen
             }
         }
 
-        // Redraw cleanly after decision
         RedrawScreen(cfg);
         return outcome;
     }
