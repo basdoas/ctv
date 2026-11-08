@@ -43,61 +43,13 @@ public static class SafetyGate
         if (_sessionAllowed.Contains(action) || _turnAllowed.Contains(action))
             return PermissionOutcome.Allow;
 
-        // Show the permission prompt.
-        AnsiConsole.WriteLine();
-        AnsiConsole.Write(new Rule("[yellow bold]⚠ Permission required[/]").RuleStyle("yellow"));
-        AnsiConsole.MarkupLine($"  [dim]{Markup.Escape(label)}[/]");
-        AnsiConsole.WriteLine();
-
-        const string once    = "Allow once";
-        const string session = "Allow in this session";
-        const string always  = "Always allow this action";
-        const string auto    = "Always allow everything (auto-mode)";
-        const string deny    = "[red]Deny[/]";
-
-        string choice;
-        try
+        if (Console.IsInputRedirected)
         {
-            choice = AnsiConsole.Prompt(
-                new SelectionPrompt<string>()
-                    .Title("What would you like to do?")
-                    .AddChoices(once, session, always, auto, deny));
-        }
-        catch (NotSupportedException)
-        {
-            // Non-interactive fallback (pipe / dumb terminal).
-            AnsiConsole.Markup("[dim]Allow? (y/N): [/]");
-            var answer = (Console.ReadLine() ?? "").Trim().ToLowerInvariant();
-            choice = answer is "y" or "yes" ? once : deny;
+            // Non-interactive fallback
+            return PermissionOutcome.Deny;
         }
 
-        switch (choice)
-        {
-            case once:
-                return PermissionOutcome.Allow;
-
-            case session:
-                _sessionAllowed.Add(action);
-                return PermissionOutcome.Allow;
-
-            case always:
-                if (!cfg.AllowedActions.Contains(action, StringComparer.OrdinalIgnoreCase))
-                    cfg.AllowedActions.Add(action);
-                ConfigStore.Save(cfg);
-                AnsiConsole.MarkupLine($"[dim]Saved to allow-list. Use /permissions to manage.[/]");
-                return PermissionOutcome.Allow;
-
-            case auto:
-                cfg.AutoApprove = true;
-                ConfigStore.Save(cfg);
-                _sessionAllowAll = true;
-                AnsiConsole.MarkupLine("[dim]Auto-approve enabled. Use /permissions to disable.[/]");
-                return PermissionOutcome.Allow;
-
-            default: // deny
-                AnsiConsole.MarkupLine("[dim](action denied)[/]");
-                return PermissionOutcome.Deny;
-        }
+        return VibeScreen.ShowApprovalModal(action, label, cfg);
     }
 
     // ── Session management ────────────────────────────────────────────────

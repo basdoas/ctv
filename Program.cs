@@ -44,10 +44,12 @@ if (current is not null)
     Questions.Load("current");
 }
 
-var editor = new LineEditor();
 CancellationTokenSource? gen = null;
-var ui = new FullScreenUi(cfg);
-ui.Start();
+
+// Cleanly enter alternate screen buffer (like mistral-vibe)
+AppDomain.CurrentDomain.ProcessExit += (_, _) => VibeScreen.ExitAltScreen();
+VibeScreen.EnterAltScreen();
+VibeScreen.RenderHeader(cfg);
 
 // Ctrl+C stops a running answer; when idle it exits normally.
 Console.CancelKeyPress += (_, e) =>
@@ -59,7 +61,14 @@ if (cfg.Providers.Count == 0)
 {
     AnsiConsole.MarkupLine("[yellow]No provider configured yet - let's add one.[/]");
     Commands.AddProvider(cfg);
-    ui.Refresh();
+    Console.Clear();
+    VibeScreen.RenderHeader(cfg);
+}
+
+// Render any previous messages restored from session
+foreach (var m in history)
+{
+    VibeScreen.RenderMessage(m, cfg);
 }
 
 while (true)
@@ -67,15 +76,23 @@ while (true)
     var theme = Ui.Get(cfg);
     var active = cfg.Active();
 
-    var line = editor.ReadLine();
+    var line = VibeScreen.ReadComposer(cfg);
     if (line is null) break;
     line = line.Trim();
     if (line.Length == 0) continue;
 
     if (line.StartsWith('/'))
     {
+        if (line.Equals("/clear", StringComparison.OrdinalIgnoreCase))
+        {
+            history.Clear();
+            SafetyGate.ClearSession();
+            Console.Clear();
+            VibeScreen.RenderHeader(cfg);
+            continue;
+        }
+
         if (!Commands.Handle(line, cfg, history)) break;
-        ui.Refresh();
         continue;
     }
 
@@ -97,27 +114,33 @@ while (true)
         {
             await Send(prompt);
         }
-        ui.Refresh();
         continue;
     }
 
     var processed = FileAttachment.ProcessAttachments(line, cfg);
     if (processed is null) continue;
 
-    ui.AddUser(processed);
     await Send(processed);
 }
 
-ui.Stop();
+VibeScreen.ExitAltScreen();
+AnsiConsole.MarkupLine("[dim]bye 👋[/]");
 return;
 
 async Task Send(string text)
 {
     var pc = cfg.Active();
-    if (pc is null) { ui.AddSystem("[red]No active provider.[/] Use /login"); ui.Refresh(); return; }
+    if (pc is null)
+    {
+        AnsiConsole.MarkupLine("[red]No active provider.[/] Use /login");
+        return;
+    }
 
     var theme = Ui.Get(cfg);
-    history.Add(new ChatMessage("user", text));
+    var userMsg = new ChatMessage("user", text);
+    history.Add(userMsg);
+    VibeScreen.RenderMessage(userMsg, cfg);
+
     var systemPrompt = SystemPrompts.Build(cfg);
 
     const int maxSteps = 8;
@@ -127,6 +150,10 @@ async Task Send(string text)
         var sw = Stopwatch.StartNew();
         gen = new CancellationTokenSource();
         bool canceled = false;
+
+        AnsiConsole.WriteLine();
+        AnsiConsole.MarkupLine($"[bold {theme.AccentHex}]✦ ctv[/]");
+
         try
         {
             var provider = Providers.Create(pc);
@@ -180,12 +207,10 @@ async Task Send(string text)
         Sessions.Save("current", history);
         Todos.Save("current");
 
-        ui.AddAssistant(fullAnswer);
-
         CodeBlocks.Parse(fullAnswer);
         if (CodeBlocks.Last.Count > 0)
         {
-            ui.AddSystem($"[dim]📦 {CodeBlocks.Last.Count} code block(s) detected. Use /expand <n> or /codeblocks[/]");
+            AnsiConsole.MarkupLine($"[dim]📦 {CodeBlocks.Last.Count} code block(s) detected. Use /expand <n> or /codeblocks[/]");
         }
 
         // ── Handle questions the AI wants to ask ──────────────────────────
@@ -198,8 +223,7 @@ async Task Send(string text)
 
         if (newQuestions.Count > 0)
         {
-            ui.AddSystem($"[dim]❓ {newQuestions.Count} question(s) awaiting your answer. Use /questions to answer.[/]");
-            // Don't continue the AI loop; wait for user to answer via /questions
+            AnsiConsole.MarkupLine($"[dim]❓ {newQuestions.Count} question(s) awaiting your answer. Use /questions to answer.[/]");
             break;
         }
 
@@ -228,8 +252,6 @@ async Task Send(string text)
                 Sessions.Save("current", history);
                 Todos.Save("current");
                 Questions.Save("current");
-                ui.AddSystem(toolResults);
-                ui.Refresh();
                 continue;
             }
         }
