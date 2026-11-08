@@ -101,8 +101,12 @@ try
             if (cmd == "/clear")
             {
                 history.Clear();
+                Todos.Clear();
+                Questions.Clear();
                 SafetyGate.ClearSession();
                 Sessions.Save("current", history);
+                Todos.Save("current");
+                Questions.Save("current");
                 VibeScreen.ClearTranscript();
                 VibeScreen.Capture(() => Ui.Banner(cfg));
                 continue;
@@ -284,6 +288,8 @@ async Task Send(string text)
             else if (step == 0) history.RemoveAt(history.Count - 1);
             VibeScreen.AddMessage(new ChatMessage("system", "(interrupted)"), cfg);
             Sessions.Save("current", history);
+                Todos.Save("current");
+                Questions.Save("current");
             break;
         }
 
@@ -300,6 +306,8 @@ async Task Send(string text)
         history.Add(new ChatMessage("assistant", fullAnswer));
 
         Sessions.Save("current", history);
+                Todos.Save("current");
+                Questions.Save("current");
         Todos.Save("current");
         CodeBlocks.Parse(fullAnswer);
 
@@ -322,6 +330,8 @@ async Task Send(string text)
             history.Add(answerMsg);
             VibeScreen.AddMessage(answerMsg, cfg);
             Sessions.Save("current", history);
+                Todos.Save("current");
+                Questions.Save("current");
             continue;
         }
 
@@ -362,6 +372,8 @@ async Task Send(string text)
         VibeScreen.AddMessage(toolMsg, cfg);
 
         Sessions.Save("current", history);
+                Todos.Save("current");
+                Questions.Save("current");
         Todos.Save("current");
         Questions.Save("current");
 

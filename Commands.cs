@@ -7,7 +7,7 @@ public static class Commands
     /// <summary>Every slash command (used for Tab completion and the footer hints).</summary>
     public static readonly string[] Names =
     {
-        "/help", "/login", "/provider", "/model", "/theme", "/system", "/config", "/permissions",
+        "/help", "/login", "/logout", "/signout", "/provider", "/model", "/theme", "/system", "/config", "/permissions",
         "/save", "/load", "/sessions", "/delete-session", "/questions", "/clear", "/quit",
         "/vibe", "/easter",
     };
@@ -110,6 +110,8 @@ public static class Commands
                     }
                     history.Clear();
                     foreach (var m in loaded) history.Add(m);
+                    Todos.Load(arg);
+                    Questions.Load(arg);
                     AnsiConsole.MarkupLine($"[green]Loaded session '{Markup.Escape(arg)}' ({history.Count} messages).[/]");
                     break;
                 }
@@ -142,6 +144,16 @@ public static class Commands
                     }
                     Sessions.Delete(arg);
                     AnsiConsole.MarkupLine($"[dim]Deleted session '{Markup.Escape(arg)}'.[/]");
+                    break;
+                }
+
+            case "/logout":
+            case "/signout":
+                {
+                    if (Auth.SignOut(cfg))
+                        AnsiConsole.MarkupLine("[dim]Signed out. API keys cleared.[/]");
+                    else
+                        AnsiConsole.MarkupLine("[dim]Nothing to sign out from.[/]");
                     break;
                 }
 

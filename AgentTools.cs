@@ -29,6 +29,20 @@ public static class AgentTools
             var rawPath = match.Groups["path"].Value.Trim();
             var content = match.Groups["content"].Value;
             var fullPath = PathResolver.Resolve(rawPath);
+            if (string.IsNullOrEmpty(fullPath))
+            {
+                results.Add(("write", rawPath, false));
+                continue;
+            }
+
+            var (pathSafe, resolvedPath, pathReason) = SafetyPolicies.CheckFilePath(fullPath, cfg);
+            if (!pathSafe)
+            {
+                SafetyPolicies.Audit("file:write", $"BLOCKED path traversal: {rawPath} -> {fullPath}", false);
+                AnsiConsole.MarkupLine($"[red]Blocked write:[/] {pathReason}");
+                results.Add(("write", rawPath, false));
+                continue;
+            }
 
             var outcome = SafetyGate.RequestApproval(
                 $"file:write:{fullPath}",
@@ -66,6 +80,27 @@ public static class AgentTools
             var oldText = match.Groups["old"].Value;
             var newText = match.Groups["new"].Value;
             var fullPath = PathResolver.Resolve(rawPath);
+            if (string.IsNullOrEmpty(fullPath))
+            {
+                results.Add(("edit", rawPath, false));
+                continue;
+            }
+
+            var (pathSafe, resolvedPath, pathReason) = SafetyPolicies.CheckFilePath(fullPath, cfg);
+            if (!pathSafe)
+            {
+                SafetyPolicies.Audit("file:write", $"BLOCKED path traversal: {rawPath} -> {fullPath}", false);
+                AnsiConsole.MarkupLine($"[red]Blocked edit:[/] {pathReason}");
+                results.Add(("edit", rawPath, false));
+                continue;
+            }
+
+            if (string.IsNullOrEmpty(oldText))
+            {
+                AnsiConsole.MarkupLine($"[red]Edit error:[/] empty <old> for {rawPath}");
+                results.Add(("edit", rawPath, false));
+                continue;
+            }
 
             var outcome = SafetyGate.RequestApproval(
                 $"file:write:{fullPath}",

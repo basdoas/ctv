@@ -43,7 +43,7 @@ public static class McpTools
             {
                 var key = am.Groups["key"].Value.Trim();
                 var val = am.Groups["val"].Value.Trim();
-                args[key] = JsonDocument.Parse($"\"{val}\"").RootElement;
+                args[key] = JsonSerializer.SerializeToElement(val);
             }
 
             var fullName = $"mcp:{server}:{tool}";

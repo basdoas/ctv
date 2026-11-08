@@ -48,7 +48,7 @@ public static class FileAttachment
             string fullPath;
             try
             {
-                fullPath = Path.GetFullPath(rawPath);
+                fullPath = Platform.ResolvePath(rawPath);
             }
             catch
             {

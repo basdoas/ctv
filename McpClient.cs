@@ -13,9 +13,9 @@ namespace Ctv;
 /// </summary>
 public sealed class McpClient : IDisposable
 {
-    readonly Process _proc;
-    readonly StreamWriter _stdin;
-    readonly StreamReader _stdout;
+    readonly Process _proc = null!;
+    readonly StreamWriter _stdin = null!;
+    readonly StreamReader _stdout = null!;
     int _nextId = 1;
     readonly Dictionary<string, McpTool> _tools = new();
 
@@ -26,23 +26,15 @@ public sealed class McpClient : IDisposable
         var psi = new ProcessStartInfo
         {
             FileName = server.Command,
-            Arguments = string.Join(" ", server.Args.Select(a => $"\"{a}\"")),
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
             CreateNoWindow = true,
         };
-        foreach (var (k, v) in server.Env)
-            psi.EnvironmentVariables[k] = v;
+        foreach (var arg in server.Args)
+            psi.ArgumentList.Add(arg);
 
-        _proc = Process.Start(psi)
-            ?? throw new InvalidOperationException($"Failed to start MCP server: {server.Name}");
-        _stdin = _proc.StandardInput;
-        _stdout = _proc.StandardOutput;
-
-        // Initialize MCP session
-        var init = SendRequest("initialize", "{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"roots\":{\"listChanged\":true}},\"clientInfo\":{\"name\":\"ctv\",\"version\":\"1.0.0\"}}");
         SendNotification("initialized");
 
         var listTools = SendRequest("tools/list", "{}");
