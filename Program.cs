@@ -49,7 +49,6 @@ CancellationTokenSource? gen = null;
 // Cleanly enter alternate screen buffer (like mistral-vibe)
 AppDomain.CurrentDomain.ProcessExit += (_, _) => VibeScreen.ExitAltScreen();
 VibeScreen.EnterAltScreen();
-VibeScreen.RenderHeader(cfg);
 
 // Ctrl+C stops a running answer; when idle it exits normally.
 Console.CancelKeyPress += (_, e) =>
@@ -61,21 +60,16 @@ if (cfg.Providers.Count == 0)
 {
     AnsiConsole.MarkupLine("[yellow]No provider configured yet - let's add one.[/]");
     Commands.AddProvider(cfg);
-    Console.Clear();
-    VibeScreen.RenderHeader(cfg);
 }
 
 // Render any previous messages restored from session
 foreach (var m in history)
 {
-    VibeScreen.RenderMessage(m, cfg);
+    VibeScreen.AddMessage(m, cfg);
 }
 
 while (true)
 {
-    var theme = Ui.Get(cfg);
-    var active = cfg.Active();
-
     var line = VibeScreen.ReadComposer(cfg);
     if (line is null) break;
     line = line.Trim();
@@ -87,12 +81,13 @@ while (true)
         {
             history.Clear();
             SafetyGate.ClearSession();
-            Console.Clear();
-            VibeScreen.RenderHeader(cfg);
+            VibeScreen.ClearTranscript();
+            VibeScreen.RedrawScreen(cfg);
             continue;
         }
 
         if (!Commands.Handle(line, cfg, history)) break;
+        VibeScreen.RedrawScreen(cfg);
         continue;
     }
 
@@ -139,7 +134,8 @@ async Task Send(string text)
     var theme = Ui.Get(cfg);
     var userMsg = new ChatMessage("user", text);
     history.Add(userMsg);
-    VibeScreen.RenderMessage(userMsg, cfg);
+    VibeScreen.AddMessage(userMsg, cfg);
+    VibeScreen.RedrawScreen(cfg, status: "thinking…");
 
     var systemPrompt = SystemPrompts.Build(cfg);
 
@@ -151,41 +147,26 @@ async Task Send(string text)
         gen = new CancellationTokenSource();
         bool canceled = false;
 
-        AnsiConsole.WriteLine();
-        AnsiConsole.MarkupLine($"[bold {theme.AccentHex}]✦ ctv[/]");
+        VibeScreen.RedrawScreen(cfg, status: step == 0 ? "✦ thinking…" : "✦ processing tools…");
 
         try
         {
             var provider = Providers.Create(pc);
             await using var e = provider.StreamAsync(history, systemPrompt, gen.Token).GetAsyncEnumerator(gen.Token);
 
-            bool has = false;
-            await AnsiConsole.Status()
-                .Spinner(Spinner.Known.Dots)
-                .SpinnerStyle(Style.Parse(theme.AccentHex))
-                .StartAsync(step == 0 ? "thinking…" : "processing tools…", async _ => { has = await e.MoveNextAsync(); });
-
-            while (has)
+            while (await e.MoveNextAsync())
             {
-                Console.Write(e.Current);
                 answer.Append(e.Current);
-                has = await e.MoveNextAsync();
             }
-            Console.WriteLine();
-            AnsiConsole.MarkupLine($"[dim]{sw.Elapsed.TotalSeconds:0.0}s[/]");
         }
         catch (OperationCanceledException)
         {
             canceled = true;
-            Console.WriteLine();
-            AnsiConsole.MarkupLine("[dim](stopped)[/]");
         }
         catch (Exception ex)
         {
-            Console.WriteLine();
-            AnsiConsole.MarkupLine($"[red]error:[/] {Markup.Escape(ex.Message)}");
-            if (ex.Message.StartsWith("HTTP 4"))
-                AnsiConsole.MarkupLine("[dim]tip: /model browses the models your provider offers, /login updates your API key[/]");
+            VibeScreen.AddMessage(new ChatMessage("system", $"Error: {ex.Message}"), cfg);
+            VibeScreen.RedrawScreen(cfg);
             break;
         }
         finally
@@ -194,7 +175,12 @@ async Task Send(string text)
             gen = null;
         }
 
-        if (canceled) break;
+        if (canceled)
+        {
+            VibeScreen.AddMessage(new ChatMessage("system", "(interrupted by user)"), cfg);
+            VibeScreen.RedrawScreen(cfg);
+            break;
+        }
 
         var fullAnswer = answer.ToString();
         if (fullAnswer.Length == 0)
@@ -203,15 +189,15 @@ async Task Send(string text)
             break;
         }
 
-        history.Add(new ChatMessage("assistant", fullAnswer));
+        var assistantMsg = new ChatMessage("assistant", fullAnswer);
+        history.Add(assistantMsg);
+        VibeScreen.AddMessage(assistantMsg, cfg);
+        VibeScreen.RedrawScreen(cfg);
+
         Sessions.Save("current", history);
         Todos.Save("current");
 
         CodeBlocks.Parse(fullAnswer);
-        if (CodeBlocks.Last.Count > 0)
-        {
-            AnsiConsole.MarkupLine($"[dim]📦 {CodeBlocks.Last.Count} code block(s) detected. Use /expand <n> or /codeblocks[/]");
-        }
 
         // ── Handle questions the AI wants to ask ──────────────────────────
         var newQuestions = QuestionTools.ParseQuestions(fullAnswer);
@@ -223,12 +209,15 @@ async Task Send(string text)
 
         if (newQuestions.Count > 0)
         {
-            AnsiConsole.MarkupLine($"[dim]❓ {newQuestions.Count} question(s) awaiting your answer. Use /questions to answer.[/]");
+            VibeScreen.AddMessage(new ChatMessage("system", $"❓ {newQuestions.Count} question(s) awaiting your answer. Use /questions to answer."), cfg);
+            VibeScreen.RedrawScreen(cfg);
             break;
         }
 
         if (AgentTools.HasToolCalls(fullAnswer))
         {
+            VibeScreen.RedrawScreen(cfg, status: "⚙ running tools…");
+
             gen = new CancellationTokenSource();
             string? toolResults = null;
             try
@@ -237,7 +226,8 @@ async Task Send(string text)
             }
             catch (OperationCanceledException)
             {
-                AnsiConsole.MarkupLine("[dim](tool execution interrupted)[/]");
+                VibeScreen.AddMessage(new ChatMessage("system", "(tool execution interrupted)"), cfg);
+                VibeScreen.RedrawScreen(cfg);
                 break;
             }
             finally
@@ -248,7 +238,11 @@ async Task Send(string text)
 
             if (!string.IsNullOrEmpty(toolResults))
             {
-                history.Add(new ChatMessage("user", toolResults));
+                var toolMsg = new ChatMessage("user", toolResults);
+                history.Add(toolMsg);
+                VibeScreen.AddMessage(toolMsg, cfg);
+                VibeScreen.RedrawScreen(cfg);
+
                 Sessions.Save("current", history);
                 Todos.Save("current");
                 Questions.Save("current");

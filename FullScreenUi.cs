@@ -18,12 +18,12 @@ public sealed class FullScreenUi : IDisposable
     public void Start()
     {
         VibeScreen.EnterAltScreen();
-        VibeScreen.RenderHeader(_cfg);
+        VibeScreen.RedrawScreen(_cfg);
     }
 
     public void Refresh()
     {
-        VibeScreen.RenderHeader(_cfg);
+        VibeScreen.RedrawScreen(_cfg);
     }
 
     public void Stop()
