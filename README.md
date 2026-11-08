@@ -1,7 +1,13 @@
 # ctv
-cool terminal vibe client
 
-A terminal chat client written in C# with gradient themes and in-app configuration.
+   ██████  ████████   ██    ██        
+  ██          ██      ██    ██        
+  ██          ██      ██    ██        
+  ██          ██       ██  ██         
+   ██████ool  ██erminal ████ibe client
+
+
+A terminal chat client written in mostly C# with gradient themes and in-app configuration.
 
 ## Run
 
