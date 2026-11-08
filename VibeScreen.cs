@@ -1,46 +1,251 @@
 using System.Diagnostics;
 using System.Text;
-using System.Text.RegularExpressions;
 using Spectre.Console;
 
 namespace Ctv;
 
 /// <summary>
-/// Full-screen, user-friendly terminal GUI inspired by mistral-vibe.
-/// Uses fixed ANSI screen-coordinate positioning (\x1b[{row};{col}H) in alternate buffer.
-/// Layout:
-/// - Row 1: Top header (Brand, Model pill, git branch, current folder)
-/// - Row 2: Divider line
-/// - Rows 3..(H-4): Transcript area (scrollable message history)
-/// - Row (H-3): Prompt box top border ╭─ Prompt ... ╮
-/// - Row (H-2): Prompt input line │ ❯ text ... │ (updated IN-PLACE on keystrokes)
-/// - Row (H-1): Prompt box bottom border ╰───────────╯
-/// - Row H: Status footer bar
-/// Keystrokes NEVER scroll the screen or print duplicate boxes.
+/// Full-screen terminal UI (alternate screen buffer) in the spirit of mistral-vibe.
+///
+/// One owner for the whole screen:
+///   * the transcript is a list of entries that is re-wrapped for the current width on every paint
+///     (so resizing works and long lines can't break the layout) and can be scrolled;
+///   * a repaint thread animates the spinner, follows streaming output and reacts to resizes;
+///   * a key-pump thread is the only reader of the keyboard, so the composer, dialogs and the
+///     "Esc to cancel" shortcut never fight over input;
+///   * legacy code that prints with Spectre / Console.WriteLine is redirected into the transcript
+///     with <see cref="Capture"/>, and its prompts are replaced by native dialogs
+///     (<see cref="Select"/>, <see cref="Ask"/>, <see cref="ShowApprovalModal"/>).
+///
+/// Layout:  row 1 header · row 2 gradient divider · transcript · prompt box (1-6 rows) · footer.
 /// </summary>
-public static class VibeScreen
+public static partial class VibeScreen
 {
-    private static bool _altScreenActive;
-    private static readonly List<string> InputHistory = new();
-    private static readonly List<string> TranscriptLines = new();
+    const string Reset = "\x1b[0m";
+    const string Dim = "\x1b[2m";
+    const string Bold = "\x1b[1m";
+    const string Cyan = "\x1b[36;1m";
+    const string Yellow = "\x1b[33m";
+    const string Green = "\x1b[32m";
+    const string Red = "\x1b[31m";
 
-    // ── Alternate Screen Buffer ────────────────────────────────────────────
+    const int MaxComposerRows = 6;
+    static readonly string[] Spin = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" };
+
+    // ── shared state (everything below is guarded by Gate) ──────────────────
+    static readonly object Gate = new();
+    static readonly List<TranscriptEntry> _entries = new();
+    static readonly TextBuffer _composer = new();
+    static TextWriter Out = Console.Out;
+    static bool _alt;
+    static AppConfig? _cfg;
+    static bool _dirty;
+    static bool _forceClear;
+    static readonly bool _trueColor = DetectTrueColor();
+    static int _lastW, _lastH;
+
+    static bool _follow = true;   // transcript sticks to the bottom
+    static int _topLine;          // first visible transcript line when not following
+    static int _lastMaxTop;       // largest valid _topLine at the last paint
+
+    static volatile bool _busy;
+    static string _busyText = "";
+    static long _busyStart;
+    static int _frame;
+    static string _flash = "";
+    static long _flashUntil;
+
+    static bool _composerActive;
+    static int _composerScroll;
+    static int _layoutW = 40;
+    static List<(int Start, int Len)> _rows = new() { (0, 0) };
+
+    static string _gradKey = "";
+    static string _gradLine = "";
+    static string _branch = "";
+    static long _branchAt;
+
+    static Thread? _ticker;
+    static Thread? _pump;
+
+    /// <summary>True while the full-screen UI owns the terminal.</summary>
+    public static bool Active => _alt;
+
+    /// <summary>Called when the user presses Esc while the app is busy (cancel the running request).</summary>
+    public static Action? CancelAction { get; set; }
+
+    // ── colors ──────────────────────────────────────────────────────────────
+    static bool DetectTrueColor()
+    {
+        var ct = Environment.GetEnvironmentVariable("COLORTERM") ?? "";
+        if (ct.Contains("truecolor", StringComparison.OrdinalIgnoreCase) ||
+            ct.Contains("24bit", StringComparison.OrdinalIgnoreCase)) return true;
+        var term = Environment.GetEnvironmentVariable("TERM") ?? "";
+        return term.Contains("direct", StringComparison.OrdinalIgnoreCase);
+    }
+
+    static string Fg((int R, int G, int B) c)
+    {
+        if (_trueColor) return $"\x1b[38;2;{c.R};{c.G};{c.B}m";
+        static int Q(int v) => v < 48 ? 0 : v < 115 ? 1 : (v - 35) / 40;
+        return $"\x1b[38;5;{16 + 36 * Q(c.R) + 6 * Q(c.G) + Q(c.B)}m";
+    }
+
+    static string Gradient(int w, Theme t)
+    {
+        string key = $"{w}|{t.Name}|{_trueColor}";
+        if (key == _gradKey) return _gradLine;
+        var sb = new StringBuilder();
+        for (int i = 0; i < w; i++)
+        {
+            double f = w <= 1 ? 0 : (double)i / (w - 1);
+            var c = ((int)(t.From.R + (t.To.R - t.From.R) * f),
+                     (int)(t.From.G + (t.To.G - t.From.G) * f),
+                     (int)(t.From.B + (t.To.B - t.From.B) * f));
+            sb.Append(Fg(c)).Append('─');
+        }
+        sb.Append(Reset);
+        _gradKey = key;
+        _gradLine = sb.ToString();
+        return _gradLine;
+    }
+
+    // ── alternate screen lifecycle ──────────────────────────────────────────
     public static void EnterAltScreen()
     {
-        if (_altScreenActive) return;
-        // Enter alternate screen, clear, home cursor, hide cursor temporarily
-        Console.Write("\x1b[?1049h\x1b[2J\x1b[H\x1b[?25h");
-        Console.Out.Flush();
-        _altScreenActive = true;
+        lock (Gate)
+        {
+            if (_alt) return;
+            Out = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16) { AutoFlush = false };
+            _alt = true;
+            _forceClear = true;
+            Out.Write("\x1b[?1049h\x1b[2J\x1b[H");
+            Out.Flush();
+        }
+        StartThreads();
     }
 
     public static void ExitAltScreen()
     {
-        if (!_altScreenActive) return;
-        // Exit alternate screen & show cursor
-        Console.Write("\x1b[?1049l\x1b[?25h");
-        Console.Out.Flush();
-        _altScreenActive = false;
+        bool taken = false;
+        try
+        {
+            Monitor.TryEnter(Gate, 500, ref taken); // never hang process exit on a stuck repaint
+            if (!_alt) return;
+            _alt = false;
+            Out.Write("\x1b[?2026l\x1b[?25h\x1b[?1049l");
+            Out.Flush();
+        }
+        catch { /* terminal already gone */ }
+        finally
+        {
+            if (taken) Monitor.Exit(Gate);
+        }
+    }
+
+    static void StartThreads()
+    {
+        if (_ticker is null)
+        {
+            _ticker = new Thread(TickerLoop) { IsBackground = true, Name = "ctv-paint" };
+            _ticker.Start();
+        }
+        if (_pump is null)
+        {
+            _pump = new Thread(PumpLoop) { IsBackground = true, Name = "ctv-keys" };
+            _pump.Start();
+        }
+    }
+
+    static int SafeW()
+    {
+        try { var w = Console.WindowWidth; return w > 0 ? w : 80; } catch { return 80; }
+    }
+
+    static int SafeH()
+    {
+        try { var h = Console.WindowHeight; return h > 0 ? h : 24; } catch { return 24; }
+    }
+
+    static void TickerLoop()
+    {
+        while (true)
+        {
+            Thread.Sleep(_busy ? 70 : 150);
+            try
+            {
+                if (!_alt) continue;
+                int w = SafeW(), h = SafeH();
+                lock (Gate)
+                {
+                    bool redraw = _dirty;
+                    if (w != _lastW || h != _lastH)
+                    {
+                        _lastW = w;
+                        _lastH = h;
+                        foreach (var e in _entries) e.CacheW = -1;
+                        _forceClear = true;
+                        redraw = true;
+                    }
+                    if (_busy) { _frame++; redraw = true; }
+                    if (_flashUntil != 0 && Environment.TickCount64 > _flashUntil)
+                    {
+                        _flash = "";
+                        _flashUntil = 0;
+                        redraw = true;
+                    }
+                    if (redraw) DrawLocked();
+                }
+            }
+            catch
+            {
+                // The repaint thread must never die.
+            }
+        }
+    }
+
+    // ── public status helpers ───────────────────────────────────────────────
+    /// <summary>Shows a spinner + label in the prompt box (and enables Esc-to-cancel). Pass null to clear.</summary>
+    public static void SetBusy(string? text)
+    {
+        lock (Gate)
+        {
+            if (text is null) _busy = false;
+            else
+            {
+                if (!_busy) _busyStart = Stopwatch.GetTimestamp();
+                _busyText = text;
+                _busy = true;
+            }
+            _dirty = true;
+        }
+    }
+
+    /// <summary>Shows a short message in the footer for a moment.</summary>
+    public static void Flash(string text, int ms = 2500)
+    {
+        lock (Gate)
+        {
+            _flash = text;
+            _flashUntil = Environment.TickCount64 + ms;
+            _dirty = true;
+        }
+    }
+
+    /// <summary>Kept for compatibility: repaint now (optionally switching the busy label).</summary>
+    public static void RedrawScreen(AppConfig cfg, string promptText = "", int cursor = 0, string? status = null)
+    {
+        lock (Gate)
+        {
+            _cfg = cfg;
+            if (status is not null) SetBusy(status);
+            DrawLocked();
+        }
+    }
+
+    static void DrawNow()
+    {
+        lock (Gate) DrawLocked();
     }
 
     public static string GetGitBranch()
@@ -51,7 +256,7 @@ public static class VibeScreen
             if (File.Exists(headFile))
             {
                 var text = File.ReadAllText(headFile).Trim();
-                if (text.StartsWith("ref: refs/heads/"))
+                if (text.StartsWith("ref: refs/heads/", StringComparison.Ordinal))
                     return text["ref: refs/heads/".Length..];
                 return text.Length > 7 ? text[..7] : text;
             }
@@ -60,535 +265,213 @@ public static class VibeScreen
         return "";
     }
 
-    // ── Transcript Management ──────────────────────────────────────────────
-    public static void ClearTranscript()
+    static string CachedBranch()
     {
-        TranscriptLines.Clear();
+        long now = Environment.TickCount64;
+        if (now - _branchAt > 2000)
+        {
+            _branch = GetGitBranch();
+            _branchAt = now;
+        }
+        return _branch;
     }
 
-    public static void AddMessage(ChatMessage m, AppConfig cfg)
+    // ── painting ────────────────────────────────────────────────────────────
+    static void DrawLocked()
     {
+        var cfg = _cfg;
+        if (!_alt || cfg is null) return;
+        _dirty = false;
+
+        int W = Math.Max(40, SafeW());
+        int H = Math.Max(12, SafeH());
         var theme = Ui.Get(cfg);
-        int maxW = Math.Max(20, Console.WindowWidth - 6);
+        string accent = Fg(theme.From);
 
-        string accent = $"\x1b[38;2;{theme.From.R};{theme.From.G};{theme.From.B}m";
-        const string cyan = "\x1b[36;1m";
-        const string reset = "\x1b[0m";
-        const string dim = "\x1b[2m";
-        const string bold = "\x1b[1m";
-
-        if (m.Role == "user")
+        var sb = new StringBuilder(16 * 1024);
+        sb.Append("\x1b[?2026h\x1b[?25l"); // synchronized update + hide cursor while painting
+        if (_forceClear)
         {
-            TranscriptLines.Add("");
-            TranscriptLines.Add($"{cyan}❯ You{reset}");
-            foreach (var line in WrapPlain(m.Content, maxW))
-            {
-                TranscriptLines.Add($"  {line}");
-            }
+            sb.Append("\x1b[2J");
+            _forceClear = false;
         }
-        else if (m.Role == "assistant")
-        {
-            TranscriptLines.Add("");
-            TranscriptLines.Add($"{accent}{bold}✦ ctv{reset}");
-            FormatAssistantLines(m.Content, maxW, accent);
-        }
-        else
-        {
-            TranscriptLines.Add("");
-            TranscriptLines.Add($"{dim}ℹ {m.Content}{reset}");
-        }
-    }
 
-    static void FormatAssistantLines(string content, int maxW, string accent)
-    {
-        const string reset = "\x1b[0m";
-        const string dim = "\x1b[2m";
-        const string yellow = "\x1b[33m";
-        const string green = "\x1b[32m";
-        const string blue = "\x1b[34m";
-
-        var rawLines = content.Split('\n');
-        bool inCode = false;
-
-        foreach (var raw in rawLines)
-        {
-            var line = raw.TrimEnd('\r');
-            if (line.StartsWith("```"))
-            {
-                inCode = !inCode;
-                TranscriptLines.Add($"  {dim}{line}{reset}");
-                continue;
-            }
-
-            if (inCode)
-            {
-                TranscriptLines.Add($"  {dim}│{reset} {line}");
-                continue;
-            }
-
-            if (line.StartsWith("[Tool Result: bash") || line.StartsWith("<bash>"))
-            {
-                TranscriptLines.Add($"  {yellow}╭─ ⚙ Shell Action ─{reset}");
-                TranscriptLines.Add($"  {yellow}│{reset} {dim}{line}{reset}");
-                TranscriptLines.Add($"  {yellow}╰───{reset}");
-                continue;
-            }
-
-            if (line.StartsWith("[Tool Result: write_file") || line.StartsWith("<write_file"))
-            {
-                TranscriptLines.Add($"  {green}╭─ ✏ File Write ─{reset}");
-                TranscriptLines.Add($"  {green}│{reset} {dim}{line}{reset}");
-                TranscriptLines.Add($"  {green}╰───{reset}");
-                continue;
-            }
-
-            if (line.StartsWith("[Tool Result: read_file") || line.StartsWith("<read_file"))
-            {
-                TranscriptLines.Add($"  {blue}╭─ 📖 File Read ─{reset}");
-                TranscriptLines.Add($"  {blue}│{reset} {dim}{line}{reset}");
-                TranscriptLines.Add($"  {blue}╰───{reset}");
-                continue;
-            }
-
-            var wrapped = WrapPlain(line, maxW);
-            if (wrapped.Count == 0)
-            {
-                TranscriptLines.Add("");
-            }
-            else
-            {
-                foreach (var w in wrapped)
-                {
-                    TranscriptLines.Add($"  {w}");
-                }
-            }
-        }
-    }
-
-    static List<string> WrapPlain(string text, int maxWidth)
-    {
-        var list = new List<string>();
-        if (string.IsNullOrEmpty(text)) return list;
-
-        while (text.Length > maxWidth)
-        {
-            int split = text.LastIndexOf(' ', maxWidth);
-            if (split <= 0) split = maxWidth;
-            list.Add(text[..split].TrimEnd());
-            text = text[split..].TrimStart();
-        }
-        if (text.Length > 0) list.Add(text);
-        return list;
-    }
-
-    // ── Full Screen Redraw ──────────────────────────────────────────────────
-    public static void RedrawScreen(AppConfig cfg, string promptText = "", int cursor = 0, string? status = null)
-    {
-        int W = Math.Max(40, Console.WindowWidth);
-        int H = Math.Max(12, Console.WindowHeight);
-
-        var theme = Ui.Get(cfg);
-        string accent = $"\x1b[38;2;{theme.From.R};{theme.From.G};{theme.From.B}m";
-        const string reset = "\x1b[0m";
-        const string dim = "\x1b[2m";
-        const string bold = "\x1b[1m";
-
-        var sb = new StringBuilder();
-
-        // 1. Clear screen & home cursor
-        sb.Append("\x1b[2J\x1b[1;1H");
-
-        // 2. Row 1: Header bar
-        var branch = GetGitBranch();
-        var branchText = !string.IsNullOrEmpty(branch) ? $"  {branch}" : "";
-        var cwdName = Path.GetFileName(Directory.GetCurrentDirectory());
+        // ── row 1: header ──
         var active = cfg.Active();
-        var modelName = active is not null ? active.Model ?? active.Name : "no-provider";
-
-        var leftHeader = " ctv · cool terminal vibe";
-        var rightHeader = $"{modelName}{branchText} 📁 {cwdName} ";
-        int spaceCount = Math.Max(1, W - leftHeader.Length - rightHeader.Length);
-
-        sb.Append($"\x1b[1;1H\x1b[2K{accent}{bold}{leftHeader}{reset}{new string(' ', spaceCount)}{dim}{rightHeader}{reset}");
-
-        // Row 2: Divider
-        sb.Append($"\x1b[2;1H\x1b[2K{accent}{new string('─', W)}{reset}");
-
-        // 3. Rows 3..(H-4): Transcript
-        int transcriptHeight = Math.Max(1, H - 6);
-        var visibleLines = TranscriptLines.Count > transcriptHeight
-            ? TranscriptLines.Skip(TranscriptLines.Count - transcriptHeight).Take(transcriptHeight).ToList()
-            : TranscriptLines;
-
-        for (int i = 0; i < transcriptHeight; i++)
+        string model = active is null ? "no provider" : (string.IsNullOrEmpty(active.Model) ? active.Name : active.Model);
+        string branch = CachedBranch();
+        string cwd = Path.GetFileName(Directory.GetCurrentDirectory());
+        string left = " ✦ ctv";
+        string leftTail = " · cool terminal vibe";
+        string right = $"{model}{(branch.Length > 0 ? "  git:" + branch : "")}  ▸ {cwd} ";
+        int room = W - 1 - AnsiText.Width(left) - AnsiText.Width(leftTail);
+        if (room < 12)
         {
-            int row = 3 + i;
-            if (i < visibleLines.Count)
+            leftTail = "";
+            room = W - 1 - AnsiText.Width(left);
+        }
+        right = AnsiText.Truncate(right, Math.Max(0, room));
+        int gap = Math.Max(1, W - 1 - AnsiText.Width(left) - AnsiText.Width(leftTail) - AnsiText.Width(right));
+        sb.Append($"\x1b[1;1H{accent}{Bold}{left}{Reset}{Dim}{leftTail}{Reset}{new string(' ', gap)}{Dim}{right}{Reset}\x1b[K");
+
+        // ── row 2: gradient divider ──
+        sb.Append($"\x1b[2;1H{Gradient(W, theme)}");
+
+        // ── composer layout (decides how tall the prompt box is) ──
+        int innerW = W - 6;
+        int layoutW = Math.Max(5, innerW - 1);
+        string text = _composer.Text;
+        var crows = LayoutRows(text, layoutW);
+        int visRows = Math.Min(Math.Max(1, crows.Count), MaxComposerRows);
+        var (curRow, curCol) = CursorPos(crows, text, _composer.Cursor);
+        if (curRow < _composerScroll) _composerScroll = curRow;
+        if (curRow >= _composerScroll + visRows) _composerScroll = curRow - visRows + 1;
+        _composerScroll = Math.Clamp(_composerScroll, 0, Math.Max(0, crows.Count - visRows));
+        _layoutW = layoutW;
+        _rows = crows;
+        int boxH = visRows + 2;
+        int tHeight = Math.Max(1, H - boxH - 3);
+
+        // ── transcript ──
+        int cw = Math.Max(20, W - 2);
+        var all = new List<string>(256);
+        foreach (var e in _entries) all.AddRange(LinesFor(e, cw, theme));
+        int maxTop = Math.Max(0, all.Count - tHeight);
+        _lastMaxTop = maxTop;
+        int top;
+        if (_follow) top = maxTop;
+        else
+        {
+            _topLine = Math.Clamp(_topLine, 0, maxTop);
+            top = _topLine;
+            if (top >= maxTop) _follow = true;
+        }
+
+        int thumbStart = -1, thumbLen = 0;
+        if (all.Count > tHeight)
+        {
+            thumbLen = Math.Max(1, tHeight * tHeight / all.Count);
+            thumbStart = (int)((long)top * (tHeight - thumbLen) / Math.Max(1, maxTop));
+        }
+
+        for (int i = 0; i < tHeight; i++)
+        {
+            int idx = top + i;
+            string line = idx < all.Count ? all[idx] : "";
+            sb.Append($"\x1b[{3 + i};1H{line}{Reset}\x1b[K");
+            if (thumbStart >= 0)
             {
-                sb.Append($"\x1b[{row};1H\x1b[2K{visibleLines[i]}");
+                bool inThumb = i >= thumbStart && i < thumbStart + thumbLen;
+                sb.Append($"\x1b[{3 + i};{W}H{(inThumb ? accent + "┃" : Dim + "│")}{Reset}");
+            }
+        }
+
+        // ── prompt box ──
+        int boxTop = 3 + tHeight;
+        string title;
+        string titleStyle;
+        if (_busy)
+        {
+            long secs = (Stopwatch.GetTimestamp() - _busyStart) / Stopwatch.Frequency;
+            title = $" {Spin[_frame % Spin.Length]} {_busyText}… {secs}s · Esc to cancel ";
+            titleStyle = Yellow;
+        }
+        else
+        {
+            title = " Prompt · @ file · ! shell · / command ";
+            titleStyle = Bold;
+        }
+        int dashes = Math.Max(1, W - 3 - AnsiText.Width(title));
+        sb.Append($"\x1b[{boxTop};1H{accent}╭─{Reset}{titleStyle}{title}{Reset}{accent}{new string('─', dashes)}╮{Reset}");
+
+        for (int r = 0; r < visRows; r++)
+        {
+            int rowIdx = _composerScroll + r;
+            int row = boxTop + 1 + r;
+            string shown;
+            int shownW;
+            if (text.Length == 0 && r == 0)
+            {
+                const string ph = "Ask anything · / for commands · @ to attach a file";
+                shown = $"{Dim}{AnsiText.Truncate(ph, innerW)}{Reset}";
+                shownW = AnsiText.Width(AnsiText.Truncate(ph, innerW));
             }
             else
             {
-                sb.Append($"\x1b[{row};1H\x1b[2K");
+                string seg = rowIdx < crows.Count ? text.Substring(crows[rowIdx].Start, crows[rowIdx].Len) : "";
+                shown = seg;
+                shownW = AnsiText.Width(seg);
             }
+            string glyph = rowIdx == 0 ? $"{accent}{Bold}❯{Reset}" : " ";
+            sb.Append($"\x1b[{row};1H{accent}│{Reset} {glyph} {shown}{new string(' ', Math.Max(0, innerW - shownW))} {accent}│{Reset}");
         }
 
-        // 4. Row H-3: Prompt top border
-        int topRow = H - 3;
-        var title = " Prompt (@ file · ! shell · / cmd) ";
-        int topDash = Math.Max(1, W - 2 - title.Length);
-        sb.Append($"\x1b[{topRow};1H\x1b[2K{accent}╭─{bold}{title}{reset}{accent}{new string('─', topDash)}╮{reset}");
+        sb.Append($"\x1b[{boxTop + boxH - 1};1H{accent}╰{new string('─', W - 2)}╯{Reset}");
 
-        // Row H-2: Prompt line
-        int inputRow = H - 2;
-        int innerW = Math.Max(10, W - 6);
-        string visibleText;
-        if (!string.IsNullOrEmpty(status))
+        // ── footer ──
+        sb.Append(BuildFooter(cfg, W, H, text));
+
+        // ── modal on top ──
+        var modal = _modal;
+        if (modal is not null) modal.Render(sb, W, H, accent);
+
+        // ── cursor ──
+        if (modal is not null)
         {
-            visibleText = $"\x1b[33m{status}\x1b[0m";
-            int pad = Math.Max(0, innerW - status.Length);
-            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {visibleText}{new string(' ', pad)}{accent}│{reset}");
+            if (modal.CursorRow > 0) sb.Append($"\x1b[{modal.CursorRow};{modal.CursorCol}H\x1b[?25h");
         }
-        else if (string.IsNullOrEmpty(promptText))
+        else if (_composerActive)
         {
-            int pad = Math.Max(0, innerW - 27);
-            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {dim}Type a message or command...{reset}{new string(' ', pad)}{accent}│{reset}");
+            int cr = boxTop + 1 + (curRow - _composerScroll);
+            int cc = Math.Min(W - 1, 5 + curCol);
+            sb.Append($"\x1b[{cr};{cc}H\x1b[?25h");
+        }
+
+        sb.Append("\x1b[?2026l");
+        try
+        {
+            Out.Write(sb.ToString());
+            Out.Flush();
+        }
+        catch (IOException)
+        {
+            // Terminal went away while we were painting.
+        }
+    }
+
+    static string BuildFooter(AppConfig cfg, int W, int H, string text)
+    {
+        if (_flash.Length > 0)
+            return $"\x1b[{H};1H {Yellow}{AnsiText.Truncate(_flash, W - 3)}{Reset}\x1b[K";
+
+        string plain;
+        if (!_follow)
+            plain = " ↑ scrolled · PgDn or Ctrl+End to follow the conversation";
+        else if (_composerActive && text.StartsWith('/') && !text.Contains(' ') && !text.Contains('\n'))
+        {
+            var matches = Commands.Names
+                .Where(n => n.StartsWith(text, StringComparison.OrdinalIgnoreCase))
+                .Take(10).ToList();
+            plain = matches.Count > 0
+                ? " " + string.Join("  ", matches) + "   (Tab completes)"
+                : " no matching command · /help lists them";
         }
         else
+            plain = " Enter send · Alt+Enter newline · PgUp/PgDn scroll · Ctrl+C quit";
+
+        string rightPlain = cfg.AutoApprove ? "auto-approve: on" : "auto-approve: off";
+        string rightStyled = cfg.AutoApprove ? $"{Green}{rightPlain}{Reset}" : $"{Dim}{rightPlain}{Reset}";
+        int rightW = rightPlain.Length;
+
+        int avail = W - 1 - rightW - 2;
+        if (avail < 12)
         {
-            string displayed = promptText.Length > innerW ? promptText[^innerW..] : promptText;
-            int pad = Math.Max(0, innerW - displayed.Length);
-            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {displayed}{new string(' ', pad)}{accent}│{reset}");
+            rightStyled = "";
+            rightW = 0;
+            avail = W - 2;
         }
-
-        // Row H-1: Prompt bottom border
-        int bottomRow = H - 1;
-        sb.Append($"\x1b[{bottomRow};1H\x1b[2K{accent}╰{new string('─', W - 2)}╯{reset}");
-
-        // Row H: Footer bar
-        var autoStatus = cfg.AutoApprove ? "\x1b[32mauto-approve: on\x1b[0m" : $"{dim}auto-approve: off{reset}";
-        var footer = $" {dim}Enter Send · Shift+Enter Newline · Tab Complete · Ctrl+C Exit{reset}   {dim}|{reset}   {autoStatus}";
-        sb.Append($"\x1b[{H};1H\x1b[2K{footer}");
-
-        // Position cursor inside prompt box
-        int cursorCol = Math.Min(W - 2, 5 + (promptText.Length > innerW ? innerW : cursor));
-        sb.Append($"\x1b[{inputRow};{cursorCol}H");
-
-        Console.Write(sb.ToString());
-        Console.Out.Flush();
-    }
-
-    // ── Fast In-Place Keystroke Update (Row H-2 Only) ───────────────────────
-    private static void UpdatePromptOnly(AppConfig cfg, string promptText, int cursor)
-    {
-        int W = Math.Max(40, Console.WindowWidth);
-        int H = Math.Max(12, Console.WindowHeight);
-
-        var theme = Ui.Get(cfg);
-        string accent = $"\x1b[38;2;{theme.From.R};{theme.From.G};{theme.From.B}m";
-        const string reset = "\x1b[0m";
-        const string dim = "\x1b[2m";
-        const string bold = "\x1b[1m";
-
-        int inputRow = H - 2;
-        int innerW = Math.Max(10, W - 6);
-
-        var sb = new StringBuilder();
-        if (string.IsNullOrEmpty(promptText))
-        {
-            int pad = Math.Max(0, innerW - 27);
-            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {dim}Type a message or command...{reset}{new string(' ', pad)}{accent}│{reset}");
-        }
-        else
-        {
-            string displayed = promptText.Length > innerW ? promptText[^innerW..] : promptText;
-            int pad = Math.Max(0, innerW - displayed.Length);
-            sb.Append($"\x1b[{inputRow};1H\x1b[2K{accent}│{reset} {accent}{bold}❯{reset} {displayed}{new string(' ', pad)}{accent}│{reset}");
-        }
-
-        int cursorCol = Math.Min(W - 2, 5 + (promptText.Length > innerW ? innerW : cursor));
-        sb.Append($"\x1b[{inputRow};{cursorCol}H");
-
-        Console.Write(sb.ToString());
-        Console.Out.Flush();
-    }
-
-    // ── Interactive Composer Loop ──────────────────────────────────────────
-    public static string? ReadComposer(AppConfig cfg)
-    {
-        var buf = new StringBuilder();
-        int cursor = 0;
-        int histIdx = InputHistory.Count;
-        string draft = "";
-
-        int lastW = Console.WindowWidth;
-        int lastH = Console.WindowHeight;
-
-        var slashCommands = new[]
-        {
-            "/help", "/login", "/provider", "/model", "/theme", "/system",
-            "/config", "/permissions", "/save", "/load", "/sessions", "/delete-session",
-            "/clear", "/quit"
-        };
-
-        // Initial full render
-        RedrawScreen(cfg, buf.ToString(), cursor);
-
-        while (true)
-        {
-            if (Console.WindowWidth != lastW || Console.WindowHeight != lastH)
-            {
-                lastW = Console.WindowWidth;
-                lastH = Console.WindowHeight;
-                RedrawScreen(cfg, buf.ToString(), cursor);
-            }
-
-            var k = Console.ReadKey(intercept: true);
-            bool ctrl = (k.Modifiers & ConsoleModifiers.Control) != 0;
-            bool shift = (k.Modifiers & ConsoleModifiers.Shift) != 0;
-            bool alt = (k.Modifiers & ConsoleModifiers.Alt) != 0;
-
-            if (k.Key == ConsoleKey.Enter)
-            {
-                if (shift || alt)
-                {
-                    buf.Insert(cursor, '\n');
-                    cursor++;
-                    UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                    continue;
-                }
-
-                var line = buf.ToString().Trim();
-                if (line.Length > 0)
-                {
-                    if (InputHistory.Count == 0 || InputHistory[^1] != line)
-                        InputHistory.Add(line);
-                }
-                return line;
-            }
-
-            if (k.Key == ConsoleKey.C && ctrl)
-            {
-                return null;
-            }
-
-            if (k.Key == ConsoleKey.D && ctrl)
-            {
-                if (buf.Length == 0) return "/quit";
-            }
-
-            if (k.Key == ConsoleKey.Backspace)
-            {
-                if (cursor > 0)
-                {
-                    buf.Remove(cursor - 1, 1);
-                    cursor--;
-                    UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                }
-                continue;
-            }
-
-            if (k.Key == ConsoleKey.Delete)
-            {
-                if (cursor < buf.Length)
-                {
-                    buf.Remove(cursor, 1);
-                    UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                }
-                continue;
-            }
-
-            if (k.Key == ConsoleKey.LeftArrow)
-            {
-                if (cursor > 0)
-                {
-                    cursor--;
-                    UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                }
-                continue;
-            }
-
-            if (k.Key == ConsoleKey.RightArrow)
-            {
-                if (cursor < buf.Length)
-                {
-                    cursor++;
-                    UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                }
-                continue;
-            }
-
-            if (k.Key == ConsoleKey.Home)
-            {
-                cursor = 0;
-                UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                continue;
-            }
-
-            if (k.Key == ConsoleKey.End)
-            {
-                cursor = buf.Length;
-                UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                continue;
-            }
-
-            if (k.Key == ConsoleKey.UpArrow)
-            {
-                if (histIdx > 0)
-                {
-                    if (histIdx == InputHistory.Count) draft = buf.ToString();
-                    histIdx--;
-                    buf.Clear().Append(InputHistory[histIdx]);
-                    cursor = buf.Length;
-                    UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                }
-                continue;
-            }
-
-            if (k.Key == ConsoleKey.DownArrow)
-            {
-                if (histIdx < InputHistory.Count)
-                {
-                    histIdx++;
-                    buf.Clear().Append(histIdx == InputHistory.Count ? draft : InputHistory[histIdx]);
-                    cursor = buf.Length;
-                    UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                }
-                continue;
-            }
-
-            // Tab completion for commands and @files
-            if (k.Key == ConsoleKey.Tab)
-            {
-                var curText = buf.ToString();
-                if (curText.StartsWith('/'))
-                {
-                    var match = slashCommands.FirstOrDefault(c => c.StartsWith(curText, StringComparison.OrdinalIgnoreCase));
-                    if (match is not null)
-                    {
-                        buf.Clear().Append(match);
-                        cursor = buf.Length;
-                        UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                    }
-                }
-                else if (curText.Contains('@'))
-                {
-                    var atIndex = curText.LastIndexOf('@');
-                    var prefix = curText[(atIndex + 1)..];
-                    try
-                    {
-                        var files = Directory.GetFileSystemEntries(".", $"{prefix}*", SearchOption.TopDirectoryOnly);
-                        if (files.Length > 0)
-                        {
-                            var picked = files[0].Replace('\\', '/').TrimStart('.', '/');
-                            buf.Remove(atIndex + 1, prefix.Length);
-                            buf.Insert(atIndex + 1, picked);
-                            cursor = buf.Length;
-                            UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                        }
-                    }
-                    catch { }
-                }
-                continue;
-            }
-
-            if (k.Key == ConsoleKey.Escape)
-            {
-                buf.Clear();
-                cursor = 0;
-                UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                continue;
-            }
-
-            if (ctrl && k.Key == ConsoleKey.W)
-            {
-                while (cursor > 0 && buf[cursor - 1] == ' ') { buf.Remove(cursor - 1, 1); cursor--; }
-                while (cursor > 0 && buf[cursor - 1] != ' ') { buf.Remove(cursor - 1, 1); cursor--; }
-                UpdatePromptOnly(cfg, buf.ToString(), cursor);
-                continue;
-            }
-
-            if (!char.IsControl(k.KeyChar))
-            {
-                buf.Insert(cursor, k.KeyChar);
-                cursor++;
-                UpdatePromptOnly(cfg, buf.ToString(), cursor);
-            }
-        }
-    }
-
-    // ── Tool Approval Modal ────────────────────────────────────────────────
-    public static PermissionOutcome ShowApprovalModal(string actionKey, string label, AppConfig cfg)
-    {
-        int W = Math.Max(40, Console.WindowWidth);
-        int H = Math.Max(12, Console.WindowHeight);
-
-        var theme = Ui.Get(cfg);
-        string accent = $"\x1b[38;2;{theme.From.R};{theme.From.G};{theme.From.B}m";
-        const string reset = "\x1b[0m";
-        const string bold = "\x1b[1m";
-        const string cyan = "\x1b[36m";
-        const string yellow = "\x1b[33m";
-        const string red = "\x1b[31m";
-        const string dim = "\x1b[2m";
-
-        int startRow = Math.Max(3, H / 2 - 4);
-        int modalW = Math.Min(W - 4, 70);
-
-        string Trunc(string s, int max) => s.Length > max ? s[..(max - 3)] + "..." : s;
-
-        var sb = new StringBuilder();
-        sb.Append($"\x1b[{startRow};2H\x1b[2K{yellow}╭─ ⚠ Tool Approval Required {new string('─', Math.Max(1, modalW - 29))}╮{reset}");
-        sb.Append($"\x1b[{startRow + 1};2H\x1b[2K{yellow}│{reset} Target: {bold}{Trunc(label, modalW - 12)}{reset}");
-        sb.Append($"\x1b[{startRow + 2};2H\x1b[2K{yellow}│{reset}   {cyan}1{reset}. Allow once          {cyan}2{reset}. Allow for session");
-        sb.Append($"\x1b[{startRow + 3};2H\x1b[2K{yellow}│{reset}   {cyan}3{reset}. Always allow        {cyan}4{reset}. Auto-mode (all)");
-        sb.Append($"\x1b[{startRow + 4};2H\x1b[2K{yellow}│{reset}   {red}5{reset}. Deny");
-        sb.Append($"\x1b[{startRow + 5};2H\x1b[2K{yellow}│{reset} {dim}[1-5] Choose option    [Esc] Deny{reset}");
-        sb.Append($"\x1b[{startRow + 6};2H\x1b[2K{yellow}╰{new string('─', modalW - 2)}╯{reset}");
-
-        Console.Write(sb.ToString());
-        Console.Out.Flush();
-
-        PermissionOutcome outcome;
-        while (true)
-        {
-            var key = Console.ReadKey(intercept: true);
-
-            if (key.Key == ConsoleKey.D1 || key.KeyChar == '1')
-            {
-                outcome = PermissionOutcome.Allow;
-                break;
-            }
-            if (key.Key == ConsoleKey.D2 || key.KeyChar == '2')
-            {
-                outcome = PermissionOutcome.Allow;
-                break;
-            }
-            if (key.Key == ConsoleKey.D3 || key.KeyChar == '3')
-            {
-                if (!cfg.AllowedActions.Contains(actionKey, StringComparer.OrdinalIgnoreCase))
-                {
-                    cfg.AllowedActions.Add(actionKey);
-                    ConfigStore.Save(cfg);
-                }
-                outcome = PermissionOutcome.Allow;
-                break;
-            }
-            if (key.Key == ConsoleKey.D4 || key.KeyChar == '4')
-            {
-                cfg.AutoApprove = true;
-                ConfigStore.Save(cfg);
-                outcome = PermissionOutcome.Allow;
-                break;
-            }
-            if (key.Key == ConsoleKey.D5 || key.KeyChar == '5' || key.Key == ConsoleKey.Escape || (key.Modifiers.HasFlag(ConsoleModifiers.Control) && key.Key == ConsoleKey.C))
-            {
-                outcome = PermissionOutcome.Deny;
-                break;
-            }
-        }
-
-        RedrawScreen(cfg);
-        return outcome;
+        plain = AnsiText.Truncate(plain, avail);
+        int pad = Math.Max(1, W - 1 - AnsiText.Width(plain) - rightW - 1);
+        return $"\x1b[{H};1H{Dim}{plain}{Reset}{new string(' ', pad)}{rightStyled}\x1b[K";
     }
 }

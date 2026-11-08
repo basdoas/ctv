@@ -23,10 +23,15 @@ public static class Ui
     public static Theme Get(AppConfig cfg) =>
         Themes.FirstOrDefault(t => t.Name == cfg.Theme) ?? Themes[0];
 
-    /// <summary>Arrow-key menu; falls back to a numbered list if the terminal can't do it.</summary>
+    /// <summary>
+    /// Asks the user to pick one item. Inside the full-screen UI this is a native dialog (arrow keys, type to filter);
+    /// otherwise an arrow-key menu / numbered list. Throws OperationCanceledException when the user cancels.
+    /// </summary>
     public static string Choose(string title, IEnumerable<string> choices)
     {
         var list = choices.ToList();
+        if (VibeScreen.Active)
+            return VibeScreen.Select(title, list) ?? throw new OperationCanceledException();
         try
         {
             return AnsiConsole.Prompt(new SelectionPrompt<string>().Title(title).AddChoices(list));
@@ -44,6 +49,35 @@ public static class Ui
                     return list[n - 1];
             }
         }
+    }
+
+    /// <summary>
+    /// One-line text input. Inside the full-screen UI this is a native dialog. Throws OperationCanceledException
+    /// when the user cancels.
+    /// </summary>
+    public static string Ask(string label, string? defaultValue = null, bool secret = false, bool allowEmpty = false)
+    {
+        if (VibeScreen.Active)
+            return VibeScreen.Ask(label, defaultValue, secret, allowEmpty) ?? throw new OperationCanceledException();
+
+        while (true)
+        {
+            var hint = string.IsNullOrEmpty(defaultValue) ? "" : $" [dim]({Markup.Escape(defaultValue)})[/]";
+            AnsiConsole.Markup($"{Markup.Escape(label)}{hint}: ");
+            var s = secret ? new LineEditor().ReadLine(mask: '*') : Console.ReadLine();
+            if (s is null) throw new OperationCanceledException();
+            s = s.Trim();
+            if (s.Length == 0 && !string.IsNullOrEmpty(defaultValue)) return defaultValue;
+            if (s.Length > 0 || allowEmpty) return s;
+        }
+    }
+
+    /// <summary>Shows a spinner in the prompt box while a blocking piece of work runs.</summary>
+    public static T Busy<T>(string status, Func<T> work)
+    {
+        VibeScreen.SetBusy(status);
+        try { return work(); }
+        finally { VibeScreen.SetBusy(null); }
     }
 
     static readonly string[] Logo =

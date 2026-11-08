@@ -59,6 +59,9 @@ public static class SafetyGate
         _turnAllowed.Clear();
     }
 
+    /// <summary>Remembers an action for the rest of this session ("Allow for this session").</summary>
+    public static void AllowForSession(string action) => _sessionAllowed.Add(action);
+
     /// <summary>Drops all session-scoped permissions (called by /clear).</summary>
     public static void ClearSession()
     {

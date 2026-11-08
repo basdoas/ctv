@@ -1,6 +1,3 @@
-
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using Spectre.Console;
 
 namespace Ctv;
@@ -53,11 +50,11 @@ public static class Auth
 
         if (key.StartsWith("env:", StringComparison.OrdinalIgnoreCase))
         {
-            var var = key[4..];
-            var value = Environment.GetEnvironmentVariable(var);
+            var envName = key[4..];
+            var value = Environment.GetEnvironmentVariable(envName);
             if (string.IsNullOrEmpty(value))
-                return new AuthStatus(p.Id, p.Name, p.Kind, AuthStateKind.NotConfigured, $"env:{var}", false, $"Environment variable {var} is not set");
-            return new AuthStatus(p.Id, p.Name, p.Kind, AuthStateKind.FromEnvironment, $"env:{var}", true, $"Key from ${var}");
+                return new AuthStatus(p.Id, p.Name, p.Kind, AuthStateKind.NotConfigured, $"env:{envName}", false, $"Environment variable {envName} is not set");
+            return new AuthStatus(p.Id, p.Name, p.Kind, AuthStateKind.FromEnvironment, $"env:{envName}", true, $"Key from ${envName}");
         }
 
         return new AuthStatus(p.Id, p.Name, p.Kind, AuthStateKind.Authenticated, "file", true, "Key stored in config");
@@ -105,7 +102,7 @@ public static class Auth
             Name = preset.Name,
             Kind = preset.Kind,
             BaseUrl = preset.BaseUrl,
-            Model = AnsiConsole.Prompt(new TextPrompt<string>("Model").DefaultValue(preset.Model)),
+            Model = Ui.Ask("Model", preset.Model),
         };
 
         // Check env var first
@@ -116,31 +113,29 @@ public static class Auth
         }
         else
         {
-            AnsiConsole.Markup("API key [dim](or env:VAR_NAME)[/]: ");
-            pc.ApiKey = (new LineEditor().ReadLine(mask: '*') ?? "").Trim();
+            pc.ApiKey = Ui.Ask("API key (or env:VAR_NAME)", secret: true, allowEmpty: true);
         }
 
-        cfg.Providers.RemoveAll(x => x.Id == pc.Id);
-        cfg.Providers.Add(pc);
-        cfg.ActiveProvider = pc.Id;
-        ConfigStore.Save(cfg);
-        AnsiConsole.MarkupLine($"[green]Saved.[/] Active provider: [bold]{Markup.Escape(pc.Name)}[/] / {Markup.Escape(pc.Model)}");
+        Save(cfg, pc);
     }
 
     static void AddCustomProvider(AppConfig cfg)
     {
         var pc = new ProviderConfig
         {
-            Id = AnsiConsole.Prompt(new TextPrompt<string>("Short id (e.g. mylab)")),
+            Id = Ui.Ask("Short id (e.g. mylab)"),
             Kind = "openai",
-            BaseUrl = AnsiConsole.Prompt(new TextPrompt<string>("Base URL (e.g. http://localhost:8000/v1)")),
-            Model = AnsiConsole.Prompt(new TextPrompt<string>("Model")),
+            BaseUrl = Ui.Ask("Base URL (e.g. http://localhost:8000/v1)"),
+            Model = Ui.Ask("Model"),
         };
         pc.Name = pc.Id;
+        pc.ApiKey = Ui.Ask("API key (or env:VAR_NAME)", secret: true, allowEmpty: true);
 
-        AnsiConsole.Markup("API key [dim](or env:VAR_NAME)[/]: ");
-        pc.ApiKey = (new LineEditor().ReadLine(mask: '*') ?? "").Trim();
+        Save(cfg, pc);
+    }
 
+    static void Save(AppConfig cfg, ProviderConfig pc)
+    {
         cfg.Providers.RemoveAll(x => x.Id == pc.Id);
         cfg.Providers.Add(pc);
         cfg.ActiveProvider = pc.Id;
@@ -161,13 +156,13 @@ public static class Auth
 
         if (choice == "All")
         {
-            Auth.SignOut(cfg);
+            SignOut(cfg);
             AnsiConsole.MarkupLine("[dim]All API keys cleared.[/]");
             return;
         }
 
-        var p = cfg.Providers.First(x => x.Name == choice);
-        Auth.SignOut(cfg, p.Id);
-        AnsiConsole.MarkupLine($"[dim]Signed out from [bold]{Markup.Escape(p.Name)}[/].[/]");
+        var provider = cfg.Providers.First(x => x.Name == choice);
+        SignOut(cfg, provider.Id);
+        AnsiConsole.MarkupLine($"[dim]Signed out from [bold]{Markup.Escape(provider.Name)}[/].[/]");
     }
 }

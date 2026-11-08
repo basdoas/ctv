@@ -1,11 +1,22 @@
-
 using Spectre.Console;
 
 namespace Ctv;
 
 public static class Commands
 {
-    /// <summary>Handles a slash command. Returns false when the app should quit.</summary>
+    /// <summary>Every slash command (used for Tab completion and the footer hints).</summary>
+    public static readonly string[] Names =
+    {
+        "/help", "/login", "/provider", "/model", "/theme", "/system", "/config", "/permissions",
+        "/save", "/load", "/sessions", "/delete-session", "/questions", "/clear", "/quit",
+        "/vibe", "/easter",
+    };
+
+    /// <summary>
+    /// Handles a slash command. Returns false when the app should quit.
+    /// Output printed here is captured into the transcript; prompts are native dialogs
+    /// (they throw OperationCanceledException when the user presses Esc).
+    /// </summary>
     public static bool Handle(string line, AppConfig cfg, List<ChatMessage> history)
     {
         var parts = line.Split(' ', 2, StringSplitOptions.TrimEntries);
@@ -19,26 +30,7 @@ public static class Commands
                 return false;
 
             case "/help":
-                var t = new Table().RoundedBorder().AddColumn("command").AddColumn("what it does");
-                t.AddRow("/login", "add or update a provider (OpenAI, Claude, Gemini, NVIDIA, Mistral, Ollama, custom...)");
-                t.AddRow("/provider", "switch the active provider");
-                t.AddRow("/model [[name]]", "browse the provider's models, or set one directly: /model name");
-                t.AddRow("/theme", "pick a color theme");
-                t.AddRow("/system", "edit the system prompt");
-                t.AddRow("/config", "show config file and configured providers");
-                t.AddRow("/permissions", "view and manage the safety allow-list");
-                t.AddRow("/save <name>", "save current conversation to a session");
-                t.AddRow("/load <name>", "load a saved session (replaces current history)");
-                t.AddRow("/sessions", "list saved sessions");
-                t.AddRow("/delete-session <name>", "remove a saved session");
-                t.AddRow("/clear", "clear the conversation and session permissions");
-                t.AddRow("/quit", "exit (Ctrl+C stops a running answer)");
-                AnsiConsole.WriteLine();
-                AnsiConsole.Write(t);
-                AnsiConsole.WriteLine();
-                AnsiConsole.MarkupLine("[dim]File access:  prefix a path with [bold]@[/] → @./file.txt what does this do?[/]");
-                AnsiConsole.MarkupLine("[dim]Shell access: prefix a command with [bold]![/] → !git log --oneline -10[/]");
-                AnsiConsole.MarkupLine("[dim]              Add a question after two spaces → !ls -la  explain the output[/]");
+                ShowHelp();
                 break;
 
             case "/login":
@@ -68,14 +60,14 @@ public static class Commands
                     var name = Ui.Choose("Theme", Ui.Themes.Select(x => x.Name));
                     cfg.Theme = name;
                     ConfigStore.Save(cfg);
-                    AnsiConsole.Clear();
-                    Ui.Banner(cfg);
+                    AnsiConsole.MarkupLine($"Theme set to [bold]{Markup.Escape(name)}[/]");
                     break;
                 }
 
             case "/system":
-                cfg.SystemPrompt = AnsiConsole.Prompt(new TextPrompt<string>("System prompt").DefaultValue(cfg.SystemPrompt));
+                cfg.SystemPrompt = Ui.Ask("System prompt", cfg.SystemPrompt);
                 ConfigStore.Save(cfg);
+                AnsiConsole.MarkupLine("[dim]System prompt updated.[/]");
                 break;
 
             case "/config":
@@ -85,8 +77,6 @@ public static class Commands
             case "/clear":
                 history.Clear();
                 SafetyGate.ClearSession();
-                AnsiConsole.Clear();
-                Ui.Banner(cfg);
                 break;
 
             case "/permissions":
@@ -133,14 +123,12 @@ public static class Commands
                         break;
                     }
                     var st = new Table().RoundedBorder().AddColumn("name").AddColumn("messages");
-                    foreach (var name in list)
+                    foreach (var sessionName in list)
                     {
-                        var loaded = Sessions.Load(name);
-                        st.AddRow(Markup.Escape(name), loaded?.Count.ToString() ?? "0");
+                        var loaded = Sessions.Load(sessionName);
+                        st.AddRow(Markup.Escape(sessionName), loaded?.Count.ToString() ?? "0");
                     }
-                    AnsiConsole.WriteLine();
                     AnsiConsole.Write(st);
-                    AnsiConsole.WriteLine();
                     break;
                 }
 
@@ -158,10 +146,38 @@ public static class Commands
                 }
 
             default:
+                if (EasterEggs.TryHandle(line, out var egg) && egg is not null)
+                {
+                    AnsiConsole.Markup(egg);
+                    if (!egg.EndsWith('\n')) AnsiConsole.WriteLine();
+                    break;
+                }
                 AnsiConsole.MarkupLine($"[yellow]Unknown command[/] {Markup.Escape(cmd)} - try /help");
                 break;
         }
         return true;
+    }
+
+    static void ShowHelp()
+    {
+        var t = new Table().RoundedBorder().AddColumn("command").AddColumn("what it does");
+        t.AddRow("/login", "add or update a provider (OpenAI, Claude, Gemini, NVIDIA, Mistral, Ollama, custom...)");
+        t.AddRow("/provider", "switch the active provider");
+        t.AddRow("/model [[name]]", "browse the provider's models, or set one directly: /model name");
+        t.AddRow("/theme", "pick a color theme");
+        t.AddRow("/system", "edit the system prompt");
+        t.AddRow("/config", "show config file and configured providers");
+        t.AddRow("/permissions", "view and manage the safety allow-list");
+        t.AddRow("/save <name>", "save the current conversation");
+        t.AddRow("/load <name>", "load a saved conversation");
+        t.AddRow("/sessions", "list saved conversations");
+        t.AddRow("/delete-session <name>", "remove a saved conversation");
+        t.AddRow("/questions", "answer questions the AI asked earlier");
+        t.AddRow("/clear", "clear the conversation and session permissions");
+        t.AddRow("/quit", "exit");
+        AnsiConsole.Write(t);
+        AnsiConsole.MarkupLine("[dim]@path  attach a file          !command  run a shell command (add two spaces + a question to ask about it)[/]");
+        AnsiConsole.MarkupLine("[dim]Alt+Enter  new line · PgUp/PgDn  scroll · Tab  complete · Esc  cancel a running answer · Ctrl+C twice  quit[/]");
     }
 
     public static void AddProvider(AppConfig cfg)
@@ -173,11 +189,11 @@ public static class Commands
         var pc = new ProviderConfig();
         if (preset is null)
         {
-            pc.Id = AnsiConsole.Prompt(new TextPrompt<string>("Short id (e.g. mylab)"));
+            pc.Id = Ui.Ask("Short id (e.g. mylab)");
             pc.Name = pc.Id;
             pc.Kind = "openai";
-            pc.BaseUrl = AnsiConsole.Prompt(new TextPrompt<string>("Base URL (e.g. http://localhost:8000/v1)"));
-            pc.Model = AnsiConsole.Prompt(new TextPrompt<string>("Model"));
+            pc.BaseUrl = Ui.Ask("Base URL (e.g. http://localhost:8000/v1)");
+            pc.Model = Ui.Ask("Model");
         }
         else
         {
@@ -185,7 +201,7 @@ public static class Commands
             pc.Name = preset.Name;
             pc.Kind = preset.Kind;
             pc.BaseUrl = preset.BaseUrl;
-            pc.Model = AnsiConsole.Prompt(new TextPrompt<string>("Model").DefaultValue(preset.Model));
+            pc.Model = Ui.Ask("Model", preset.Model);
         }
 
         if (preset is null || preset.KeyEnv is not null)
@@ -198,8 +214,7 @@ public static class Commands
             }
             else
             {
-                AnsiConsole.Markup("API key [dim](or env:VAR_NAME)[/]: ");
-                pc.ApiKey = (new LineEditor().ReadLine(mask: '*') ?? "").Trim();
+                pc.ApiKey = Ui.Ask("API key (or env:VAR_NAME)", secret: true, allowEmpty: true);
             }
         }
 
@@ -216,7 +231,7 @@ public static class Commands
         List<string> models;
         try
         {
-            models = AnsiConsole.Status().Start("fetching models…", _ => Providers.ListModelsAsync(p).GetAwaiter().GetResult());
+            models = Ui.Busy("fetching models", () => Providers.ListModelsAsync(p).GetAwaiter().GetResult());
         }
         catch (Exception ex)
         {
@@ -225,26 +240,9 @@ public static class Commands
             models = new List<string>();
         }
 
-        string chosen;
-        if (models.Count == 0)
-        {
-            chosen = AnsiConsole.Prompt(new TextPrompt<string>("Model").DefaultValue(p.Model));
-        }
-        else
-        {
-            try
-            {
-                chosen = AnsiConsole.Prompt(new SelectionPrompt<string>()
-                    .Title($"Model for {Markup.Escape(p.Name)} [dim](type to search)[/]")
-                    .PageSize(15)
-                    .EnableSearch()
-                    .AddChoices(models));
-            }
-            catch (NotSupportedException)
-            {
-                chosen = AnsiConsole.Prompt(new TextPrompt<string>("Model").DefaultValue(p.Model));
-            }
-        }
+        string chosen = models.Count == 0
+            ? Ui.Ask("Model", p.Model)
+            : Ui.Choose($"Model for {p.Name}", models);
 
         p.Model = chosen;
         ConfigStore.Save(cfg);
@@ -259,6 +257,7 @@ public static class Commands
         if (choice == add) { AddProvider(cfg); return; }
         cfg.ActiveProvider = cfg.Providers.First(p => p.Name == choice).Id;
         ConfigStore.Save(cfg);
+        AnsiConsole.MarkupLine($"Active provider: [bold]{Markup.Escape(choice)}[/]");
     }
 
     static void ShowConfig(AppConfig cfg)
@@ -269,7 +268,7 @@ public static class Commands
         var active = cfg.Active();
         foreach (var p in cfg.Providers)
         {
-            string key = p.ApiKey.StartsWith("env:") ? p.ApiKey
+            string key = p.ApiKey.StartsWith("env:", StringComparison.Ordinal) ? p.ApiKey
                 : p.ApiKey.Length == 0 ? "none"
                 : "set";
             t.AddRow(p == active ? "●" : "", Markup.Escape(p.Name), p.Kind, Markup.Escape(p.Model), Markup.Escape(key));
@@ -280,9 +279,7 @@ public static class Commands
 
     static void ShowPermissions(AppConfig cfg)
     {
-        AnsiConsole.WriteLine();
         AnsiConsole.MarkupLine($"[bold]Auto-approve:[/] {(cfg.AutoApprove ? "[green]on[/]" : "[dim]off[/]")}");
-        AnsiConsole.WriteLine();
 
         if (cfg.AllowedActions.Count == 0)
         {
@@ -297,15 +294,12 @@ public static class Commands
             AnsiConsole.Write(t);
         }
 
-        AnsiConsole.WriteLine();
-
-        const string toggleAuto  = "Toggle auto-approve";
+        const string toggleAuto = "Toggle auto-approve";
         const string removeEntry = "Remove an allow-list entry";
-        const string clearAll    = "Clear entire allow-list";
-        const string done        = "Done";
+        const string clearAll = "Clear entire allow-list";
+        const string done = "Done";
 
-        var action = Ui.Choose("What would you like to do?",
-            [toggleAuto, removeEntry, clearAll, done]);
+        var action = Ui.Choose("What would you like to do?", [toggleAuto, removeEntry, clearAll, done]);
 
         switch (action)
         {
@@ -316,7 +310,7 @@ public static class Commands
                 break;
 
             case removeEntry when cfg.AllowedActions.Count > 0:
-                var pick = Ui.Choose("Remove which entry?", cfg.AllowedActions);
+                var pick = Ui.Choose("Remove which entry?", cfg.AllowedActions.ToList());
                 SafetyGate.RemoveAllowedAction(pick, cfg);
                 AnsiConsole.MarkupLine($"[dim]Removed: {Markup.Escape(pick)}[/]");
                 break;
@@ -333,4 +327,3 @@ public static class Commands
         }
     }
 }
-
