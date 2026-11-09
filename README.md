@@ -5,7 +5,7 @@
 .██          ██      ██    ██        .
 .██          ██       ██  ██         .
 . ██████ool  ██erminal ████ibe client.
-
+.
 
 A terminal chat client written in mostly C# with gradient themes and in-app configuration.
 
