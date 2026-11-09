@@ -1,0 +1,118 @@
+name: release
+
+# Push a tag like v0.1.0 to publish:
+#   - ctv-linux-x64.tar.gz + SHA256SUMS   (used by install.sh)
+#   - an RPM attached to the GitHub release
+#   - a dnf repository on GitHub Pages     (https://basdoas.github.io/ctv/)
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Native AOT prerequisites
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
+      - name: Publish (native AOT)
+        run: dotnet publish ctv.csproj -c Release -r linux-x64 -o dist
+
+      - name: Show the binary's dependencies
+        run: |
+          ls -lh dist/ctv
+          ldd dist/ctv
+
+      - name: Package
+        run: |
+          mkdir pkg
+          cp dist/ctv LICENSE README.md pkg/
+          tar -C pkg -czf ctv-linux-x64.tar.gz .
+          sha256sum ctv-linux-x64.tar.gz > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball
+          path: |
+            ctv-linux-x64.tar.gz
+            SHA256SUMS
+
+  rpm:
+    needs: build
+    runs-on: ubuntu-24.04
+    container: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarball
+
+      - name: Build the RPM and the dnf repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          dnf install -y rpm-build createrepo_c tar gzip
+
+          VERSION="0.0.0"
+          if [ "$GITHUB_REF_TYPE" = "tag" ]; then VERSION="${GITHUB_REF_NAME#v}"; fi
+
+          mkdir -p ~/rpmbuild/SOURCES
+          cp ctv-linux-x64.tar.gz ~/rpmbuild/SOURCES/
+          rpmbuild -bb packaging/ctv.spec --define "ctv_version ${VERSION}"
+
+          mkdir repo
+          cp ~/rpmbuild/RPMS/x86_64/*.rpm repo/
+          createrepo_c repo
+          cp packaging/ctv.repo repo/ctv.repo
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rpm-repo
+          path: repo
+
+  publish:
+    needs: [build, rpm]
+    runs-on: ubuntu-24.04
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: tarball
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: rpm-repo
+          path: repo
+
+      - name: Attach files to the GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ctv-linux-x64.tar.gz
+            SHA256SUMS
+            repo/*.rpm
+
+      # Needs Settings -> Pages -> "Deploy from a branch" -> gh-pages / (root), once.
+      - name: Publish the dnf repository (GitHub Pages)
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: repo
+          force_orphan: true

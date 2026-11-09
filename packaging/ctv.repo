@@ -1,0 +1,8 @@
+[ctv]
+name=ctv - cool terminal vibe client
+baseurl=https://basdoas.github.io/ctv/
+enabled=1
+# Packages are not GPG-signed yet. Once they are: set gpgcheck=1 and add gpgkey=<url>.
+gpgcheck=0
+repo_gpgcheck=0
+metadata_expire=1h

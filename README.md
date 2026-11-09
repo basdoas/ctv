@@ -9,6 +9,35 @@
 
 A terminal chat client written in mostly C# with gradient themes and in-app configuration.
 
+## Install
+
+### Any Linux (x86_64)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/basdoas/ctv/main/install.sh | bash
+```
+
+Downloads the latest release, checks its SHA-256 and installs it to `~/.local/bin` (or `/usr/local/bin` when run as root).
+Options: `--version 0.2.0`, `--prefix /usr/local`, `--from-source` (needs the .NET SDK and clang), `--uninstall` (add `--purge` to also delete `~/.config/ctv`).
+
+### Fedora (dnf)
+
+```bash
+# Fedora 41+ (dnf5)
+sudo dnf config-manager addrepo --from-repofile=https://basdoas.github.io/ctv/ctv.repo
+
+# Fedora 40 and older (dnf4: sudo dnf install dnf-plugins-core first)
+sudo dnf config-manager --add-repo https://basdoas.github.io/ctv/ctv.repo
+
+sudo dnf install ctv
+```
+
+Updates arrive with `sudo dnf upgrade`.
+
+### Releases (maintainers)
+
+Push a tag such as `v0.1.0`. `.github/workflows/release.yml` builds the native binary, then publishes the tarball + `SHA256SUMS`, the RPM and the dnf repository.
+
 ## Run
 
 ```bash
