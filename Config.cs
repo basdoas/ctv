@@ -23,6 +23,11 @@ public sealed class AppConfig
     public string ActiveAgent { get; set; } = "ask";
     public string SystemPrompt { get; set; } =
         "You are ctv, a helpful and concise assistant living in the user's terminal.";
+    /// <summary>
+    /// Maximum tool rounds the agent may run for one message before it stops and waits for the user.
+    /// 0 turns the limit off. The agent is told this value (system prompt and tool results).
+    /// </summary>
+    public int MaxSteps { get; set; } = 8;
     public List<ProviderConfig> Providers { get; set; } = new();
 
     // ── Safety ────────────────────────────────────────────────────────────────

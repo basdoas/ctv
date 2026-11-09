@@ -329,8 +329,8 @@ public static partial class VibeScreen
         _composerScroll = Math.Clamp(_composerScroll, 0, Math.Max(0, crows.Count - visRows));
         _layoutW = layoutW;
         _rows = crows;
-        int boxH = visRows + 2;
-        int tHeight = Math.Max(1, H - boxH - 3);
+        int boxH = visRows + 2; // title row + content rows + bottom border
+        int tHeight = Math.Max(2, H - boxH - 3); // keep gap above footer
 
         // ── transcript ──
         int cw = Math.Max(20, W - 2);
@@ -459,7 +459,11 @@ public static partial class VibeScreen
         else
             plain = " Enter send · Alt+Enter newline · PgUp/PgDn scroll · Ctrl+C quit";
 
+        int pendingTodos = Todos.Current.Count(t => !t.IsDone);
+        string todoPlain = pendingTodos > 0 ? $"todos: {pendingTodos} pending" : "";
         string rightPlain = cfg.AutoApprove ? "auto-approve: on" : "auto-approve: off";
+        if (todoPlain.Length > 0)
+            rightPlain = $"{rightPlain}  ·  {todoPlain}";
         string rightStyled = cfg.AutoApprove ? $"{Green}{rightPlain}{Reset}" : $"{Dim}{rightPlain}{Reset}";
         int rightW = rightPlain.Length;
 

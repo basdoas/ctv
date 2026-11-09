@@ -1,19 +1,24 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.IO;
 
 namespace Ctv;
 
 public static partial class VibeScreen
 {
     readonly record struct KeyEvent(ConsoleKeyInfo Key, long Stamp);
+    readonly record struct MouseEvent(int Button, int X, int Y, bool Pressed, bool WheelUp, bool WheelDown);
 
-    static readonly ConcurrentQueue<KeyEvent> KeyQueue = new();
-    static readonly SemaphoreSlim KeySignal = new(0);
+    static readonly ConcurrentQueue<object> EventQueue = new();
+    static readonly SemaphoreSlim EventSignal = new(0);
     static readonly List<string> InputHistory = new();
     static volatile bool _ctrlCSignal;
     static long _lastCtrlC;
 
     // ── keyboard pump: the ONLY thread that reads the terminal ─────────────
+    // Console.ReadKey puts the terminal into non-canonical, no-echo mode and decodes UTF-8, Alt+key, arrows,
+    // Home/End/PgUp/PgDn/Delete and a lone Esc for us. (Reading raw bytes through Console.OpenStandardInput
+    // does NOT work on a terminal: .NET gives that stream a line reader, so text only arrives after Enter.)
     static void PumpLoop()
     {
         while (true)
@@ -23,28 +28,65 @@ public static partial class VibeScreen
             catch (InvalidOperationException) { return; } // stdin is not a terminal
             catch (IOException) { return; }
 
-            // Esc while a request is running cancels it (but not while a dialog is open: there it means "deny/close").
-            if (_busy && Volatile.Read(ref _modalDepth) == 0 && k.Key == ConsoleKey.Escape && k.Modifiers == 0)
+            try
             {
-                CancelAction?.Invoke();
-                continue;
+                HandleKey(k);
             }
-
-            KeyQueue.Enqueue(new KeyEvent(k, Stopwatch.GetTimestamp()));
-            KeySignal.Release();
+            catch
+            {
+                // A odd key must never kill the key pump.
+            }
         }
     }
 
-    static KeyEvent? NextKey(int timeoutMs)
+    static void HandleKey(ConsoleKeyInfo k)
     {
-        if (!KeySignal.Wait(timeoutMs)) return null;
-        return KeyQueue.TryDequeue(out var ev) ? ev : null;
+        if (k.Key == ConsoleKey.Enter)
+        {
+            // On Linux the tty turns Enter into LF, so Enter's KeyChar is '\n' there: never treat '\n' as "newline".
+            // A typed Enter has no more input right behind it; a pasted line break does, and that one must not send.
+            bool shift = (k.Modifiers & ConsoleModifiers.Shift) != 0;
+            bool alt = (k.Modifiers & ConsoleModifiers.Alt) != 0;
+            bool pasted = false;
+            if (!shift && !alt)
+            {
+                Thread.Sleep(3);
+                try { pasted = Console.KeyAvailable; } catch (InvalidOperationException) { }
+            }
+            Emit(new ConsoleKeyInfo('\r', ConsoleKey.Enter, shift || pasted, alt, false));
+            return;
+        }
+
+        if (k.KeyChar == '\n') // Ctrl+J: an explicit line break
+        {
+            Emit(new ConsoleKeyInfo('\r', ConsoleKey.Enter, true, false, false));
+            return;
+        }
+
+        Emit(k);
     }
 
-    /// <summary>Called from the Ctrl+C handler. While idle the composer reacts to it; while busy Program cancels the request.</summary>
+    static void Emit(ConsoleKeyInfo k)
+    {
+        // Esc while a request is running cancels it (but not while a dialog is open: there it means "close/deny").
+        if (k.Key == ConsoleKey.Escape && k.Modifiers == 0 && _busy && Volatile.Read(ref _modalDepth) == 0)
+        {
+            CancelAction?.Invoke();
+            return;
+        }
+
+        EventQueue.Enqueue(new KeyEvent(k, Stopwatch.GetTimestamp()));
+        EventSignal.Release();
+    }
+
+    static object? NextEvent(int timeoutMs)
+    {
+        if (!EventSignal.Wait(timeoutMs)) return null;
+        return EventQueue.TryDequeue(out var ev) ? ev : null;
+    }
+
     public static void NotifyCtrlC() => _ctrlCSignal = true;
 
-    /// <summary>Leaves the alternate screen and ends the process immediately (second Ctrl+C while stuck).</summary>
     public static void ForceExit()
     {
         ExitAltScreen();
@@ -87,32 +129,34 @@ public static partial class VibeScreen
                     continue;
                 }
 
-                var ev = NextKey(60);
+                var ev = NextEvent(60);
                 if (ev is null) continue;
-                var k = ev.Value.Key;
+
+                if (ev is MouseEvent mouse)
+                {
+                    if (mouse.WheelUp) ScrollLines(-3);
+                    else if (mouse.WheelDown) ScrollLines(3);
+                    continue;
+                }
+
+                if (ev is not KeyEvent keyEvent) continue;
+                var k = keyEvent.Key;
                 bool ctrl = (k.Modifiers & ConsoleModifiers.Control) != 0;
                 bool alt = (k.Modifiers & ConsoleModifiers.Alt) != 0;
                 bool shift = (k.Modifiers & ConsoleModifiers.Shift) != 0;
 
                 if (k.Key != ConsoleKey.Tab) tabMatches = null;
 
-                // Ctrl+J delivers a bare line feed: always a newline.
-                if (k.KeyChar == '\n')
-                {
-                    lock (Gate) _composer.Insert("\n");
-                    DrawNow();
-                    continue;
-                }
-
                 if (k.Key == ConsoleKey.Enter)
                 {
-                    bool newline = alt || shift || IsPasteBurst(ev.Value);
+                    // Alt+Enter, Ctrl+J, a pasted line break (reported as Shift) or a trailing backslash add a line;
+                    // a plain Enter sends the message.
+                    bool newline = alt || shift;
                     string current;
                     lock (Gate) current = _composer.Text;
 
                     if (!newline && current.EndsWith('\\'))
                     {
-                        // A trailing backslash continues the message on the next line.
                         lock (Gate)
                         {
                             _composer.Backspace();
@@ -233,15 +277,6 @@ public static partial class VibeScreen
         }
     }
 
-    /// <summary>A pasted newline arrives in the same burst as the next character; a typed Enter doesn't.</summary>
-    static bool IsPasteBurst(KeyEvent enter)
-    {
-        Thread.Sleep(3);
-        if (!KeyQueue.TryPeek(out var next)) return false;
-        long ms = (next.Stamp - enter.Stamp) * 1000 / Stopwatch.Frequency;
-        return ms < 6;
-    }
-
     static void ScrollLines(int delta)
     {
         lock (Gate)
@@ -295,7 +330,6 @@ public static partial class VibeScreen
         return (row, AnsiText.Width(text.Substring(start, end - start)));
     }
 
-    /// <summary>Moves the cursor one visual row up/down inside a multi-line message. False when already at the edge.</summary>
     static bool MoveCursorRows(int dir)
     {
         lock (Gate)

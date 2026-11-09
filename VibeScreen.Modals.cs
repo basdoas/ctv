@@ -4,6 +4,9 @@ namespace Ctv;
 
 public static partial class VibeScreen
 {
+    /// <summary>One row of a settings-style menu: name, current value, and an explanation shown while it is highlighted.</summary>
+    public sealed record MenuItem(string Label, string Value, string Hint);
+
     static Modal? _modal;
     static int _modalDepth;
 
@@ -55,11 +58,20 @@ public static partial class VibeScreen
         }
     }
 
-    static void RunModal(Modal m)
+    /// <summary>A settings-style list (name, current value, hint for the highlighted row). Returns the chosen index, or null on Esc.</summary>
+    public static int? Menu(string title, IReadOnlyList<MenuItem> items, int initial = 0)
+    {
+        if (items.Count == 0) return null;
+        var m = new MenuModal(title, items, initial);
+        RunModal(m);
+        return m.Cancelled ? null : m.Index;
+    }
+
+    public static void RunModal(Modal m)
     {
         // Keys typed ahead while something else was running must never answer a dialog
         // (a stray Enter could otherwise approve a command).
-        while (KeySignal.Wait(0)) KeyQueue.TryDequeue(out _);
+        while (EventSignal.Wait(0)) EventQueue.TryDequeue(out _);
         _ctrlCSignal = false;
 
         Interlocked.Increment(ref _modalDepth);
@@ -81,13 +93,13 @@ public static partial class VibeScreen
                     break;
                 }
 
-                var ev = NextKey(80);
-                if (ev is null) continue;
+                var ev = NextEvent(80);
+                if (ev is not KeyEvent keyEvent) continue; // timeouts and mouse reports are ignored inside dialogs
 
                 bool done;
                 lock (Gate)
                 {
-                    done = m.HandleKey(ev.Value.Key);
+                    done = m.HandleKey(keyEvent.Key);
                     if (!done) DrawLocked();
                 }
                 if (done) break;
@@ -106,9 +118,10 @@ public static partial class VibeScreen
     }
 
     // ── dialog widgets ──────────────────────────────────────────────────────
-    abstract class Modal
+    public abstract class Modal
     {
         public bool Cancelled;
+        public string Result = "";
         /// <summary>1-based screen position of the text cursor; row 0 hides it.</summary>
         public int CursorRow;
         public int CursorCol;
@@ -142,8 +155,6 @@ public static partial class VibeScreen
         readonly TextBuffer _filter = new();
         List<int> _idx = new();
         int _sel, _top;
-
-        public string Result = "";
 
         public SelectModal(string title, IReadOnlyList<string> all)
         {
@@ -276,14 +287,96 @@ public static partial class VibeScreen
         }
     }
 
+    sealed class MenuModal : Modal
+    {
+        readonly string _title;
+        readonly IReadOnlyList<MenuItem> _items;
+        int _sel, _top;
+
+        public int Index = -1;
+
+        public MenuModal(string title, IReadOnlyList<MenuItem> items, int initial)
+        {
+            _title = title;
+            _items = items;
+            _sel = Math.Clamp(initial, 0, Math.Max(0, items.Count - 1));
+        }
+
+        public override bool HandleKey(ConsoleKeyInfo k)
+        {
+            switch (k.Key)
+            {
+                case ConsoleKey.UpArrow: _sel = (_sel + _items.Count - 1) % _items.Count; return false;
+                case ConsoleKey.DownArrow: _sel = (_sel + 1) % _items.Count; return false;
+                case ConsoleKey.Home: _sel = 0; return false;
+                case ConsoleKey.End: _sel = _items.Count - 1; return false;
+                case ConsoleKey.Enter: Index = _sel; return true;
+                case ConsoleKey.Escape: Cancelled = true; return true;
+            }
+            return false;
+        }
+
+        public override void Render(StringBuilder sb, int W, int H, string accent)
+        {
+            CursorRow = 0;
+            int labelW = _items.Max(i => AnsiText.Width(i.Label));
+            int valueW = Math.Min(34, _items.Max(i => AnsiText.Width(i.Value)));
+            int boxW = Math.Clamp(labelW + valueW + 14, 56, Math.Max(56, Math.Min(W - 4, 92)));
+            int innerW = boxW - 4;
+            int vis = Math.Max(3, Math.Min(_items.Count, H - 13));
+            if (_sel < _top) _top = _sel;
+            if (_sel >= _top + vis) _top = _sel - vis + 1;
+            _top = Math.Max(0, _top);
+
+            int boxH = vis + 7; // top, rows, divider, 3 hint lines, key help, bottom
+            int row0 = Math.Max(2, (H - boxH) / 2);
+            int col0 = Math.Max(1, (W - boxW) / 2 + 1);
+            int r = row0;
+
+            Top(sb, r++, col0, boxW, _title, accent);
+
+            int valueAvail = Math.Max(4, innerW - 2 - labelW - 2);
+            for (int i = 0; i < vis; i++)
+            {
+                int ix = _top + i;
+                if (ix >= _items.Count)
+                {
+                    Line(sb, r++, col0, boxW, "", accent);
+                    continue;
+                }
+
+                var it = _items[ix];
+                string label = it.Label.PadRight(labelW);
+                string value = AnsiText.Truncate(it.Value, valueAvail);
+                Line(sb, r++, col0, boxW,
+                    ix == _sel
+                        ? $"{accent}▸ {Bold}{label}{Reset}  {accent}{value}{Reset}"
+                        : $"  {label}  {Dim}{value}{Reset}",
+                    accent);
+            }
+
+            Line(sb, r++, col0, boxW, $"{Dim}{new string('─', innerW)}{Reset}", accent);
+
+            var hint = AnsiText.Wrap(_items[_sel].Hint, innerW);
+            if (hint.Count > 3)
+            {
+                hint = hint.Take(3).ToList();
+                hint[2] = AnsiText.Truncate(AnsiText.Strip(hint[2]) + " …", innerW);
+            }
+            for (int i = 0; i < 3; i++)
+                Line(sb, r++, col0, boxW, i < hint.Count ? hint[i] : "", accent);
+
+            Line(sb, r++, col0, boxW, $"{Dim}↑↓ move · Enter change · Esc close{Reset}", accent);
+            Bottom(sb, r, col0, boxW, accent);
+        }
+    }
+
     sealed class AskModal : Modal
     {
         readonly string _label;
         readonly bool _secret, _allowEmpty;
         readonly TextBuffer _buf = new();
         string _error = "";
-
-        public string Result = "";
 
         public AskModal(string label, string defaultValue, bool secret, bool allowEmpty)
         {
@@ -425,6 +518,77 @@ public static partial class VibeScreen
             }
             Line(sb, r++, col0, boxW, $"{Dim}1-5 choose · Enter confirm · Esc deny{Reset}", Yellow);
             Bottom(sb, r, col0, boxW, Yellow);
+        }
+    }
+
+    public sealed class ArtifactModal : Modal
+    {
+        readonly List<(string Lang, string Code)> _blocks;
+        int _idx;
+        int _scroll;
+        public int SelectedIndex => _idx;
+        public ArtifactModal(List<(string Lang, string Code)> blocks)
+        {
+            _blocks = blocks;
+        }
+
+        public override bool HandleKey(ConsoleKeyInfo k)
+        {
+            switch (k.Key)
+            {
+                case ConsoleKey.Escape:
+                    Cancelled = true;
+                    return true;
+                case ConsoleKey.RightArrow:
+                case ConsoleKey.PageDown:
+                    _idx = Math.Min(_idx + 1, _blocks.Count - 1);
+                    _scroll = 0;
+                    return false;
+                case ConsoleKey.LeftArrow:
+                case ConsoleKey.PageUp:
+                    _idx = Math.Max(_idx - 1, 0);
+                    _scroll = 0;
+                    return false;
+                case ConsoleKey.UpArrow:
+                    _scroll = Math.Max(0, _scroll - 1);
+                    return false;
+                case ConsoleKey.DownArrow:
+                    _scroll = Math.Min(_scroll + 1, Math.Max(0, _blocks[_idx].Code.Split('\n').Length - 1));
+                    return false;
+                case ConsoleKey.Enter:
+                    Result = _blocks[_idx].Code;
+                    return true;
+            }
+            return false;
+        }
+
+        public override void Render(StringBuilder sb, int W, int H, string accent)
+        {
+            var (lang, code) = _blocks[_idx];
+            var lines = code.Split('\n');
+            int totalLines = lines.Length;
+            int visibleLines = Math.Max(1, H - 12);
+            _scroll = Math.Clamp(_scroll, 0, Math.Max(0, totalLines - visibleLines));
+
+            int boxW = Math.Clamp(80, 40, Math.Max(40, W - 4));
+            int innerW = boxW - 4;
+            int boxH = visibleLines + 6;
+            int row0 = Math.Max(2, (H - boxH) / 2);
+            int col0 = Math.Max(1, (W - boxW) / 2 + 1);
+            int r = row0;
+
+            Top(sb, r++, col0, boxW, $"Artifact {_idx + 1}/{_blocks.Count} · {lang}", accent);
+            Line(sb, r++, col0, boxW, $"{Dim}◀◀ prev · ▶▶ next · ▲▼ scroll · Enter copy · Esc close{Reset}", accent);
+            Line(sb, r++, col0, boxW, "", accent);
+
+            for (int i = _scroll; i < _scroll + visibleLines && i < totalLines; i++)
+            {
+                string line = lines[i];
+                string styled = AnsiText.Truncate(line, Math.Max(1, innerW - 2));
+                Line(sb, r++, col0, boxW, $"  {styled}", accent);
+            }
+
+            Bottom(sb, r, col0, boxW, accent);
         }
     }
 }

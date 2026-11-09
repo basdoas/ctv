@@ -206,6 +206,21 @@ void RunCaptured(Action action)
     }
 }
 
+// One line the model reads at the end of every tool result: how many steps it has used and how many are left.
+string StepStatus(int step, int maxSteps)
+{
+    int used = step + 1;
+    if (maxSteps <= 0)
+        return $"[Agent status: step {used}. No step limit is set.]";
+
+    int left = maxSteps - used;
+    if (left <= 0)
+        return $"[Agent status: step {used} of {maxSteps}. The step limit was reached, so you are paused until the user sends another message (they can raise the limit in /settings).]";
+
+    string tail = left == 1 ? " You get one more step after this one, so finish up or summarize what is left." : "";
+    return $"[Agent status: step {used} of {maxSteps}, {left} left before you are paused.{tail}]";
+}
+
 async Task Send(string text)
 {
     var pc = cfg.Active();
@@ -221,8 +236,9 @@ async Task Send(string text)
 
     var systemPrompt = SystemPrompts.Build(cfg);
 
-    const int maxSteps = 8;
-    for (int step = 0; step < maxSteps; step++)
+    int maxSteps = Math.Max(0, cfg.MaxSteps); // 0 = no limit (set in /settings)
+    bool limited = maxSteps > 0;
+    for (int step = 0; !limited || step < maxSteps; step++)
     {
         var answer = new StringBuilder();
         var cts = new CancellationTokenSource();
@@ -367,6 +383,8 @@ async Task Send(string text)
 
         if (toolsFailed || string.IsNullOrEmpty(toolResults)) break;
 
+        // Tell the model where it is in its step budget; the line is also visible to the user in the tool-result block.
+        toolResults = toolResults + "\n\n" + StepStatus(step, maxSteps);
         var toolMsg = new ChatMessage("user", toolResults);
         history.Add(toolMsg);
         VibeScreen.AddMessage(toolMsg, cfg);
@@ -377,8 +395,8 @@ async Task Send(string text)
         Todos.Save("current");
         Questions.Save("current");
 
-        if (step == maxSteps - 1)
-            VibeScreen.AddMessage(new ChatMessage("system", $"Stopped after {maxSteps} steps. Send a message to continue."), cfg);
+        if (limited && step == maxSteps - 1)
+            VibeScreen.AddMessage(new ChatMessage("system", $"Stopped after {maxSteps} steps (change the limit in /settings). Send a message to continue."), cfg);
         // otherwise loop: the model reads the tool results and answers
     }
 }

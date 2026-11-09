@@ -49,6 +49,11 @@ public static class FileAttachment
             try
             {
                 fullPath = Platform.ResolvePath(rawPath);
+                if (string.IsNullOrEmpty(fullPath))
+                {
+                    rest.Add(token);
+                    continue;
+                }
             }
             catch
             {
@@ -56,7 +61,16 @@ public static class FileAttachment
                 continue;
             }
 
-            if (!File.Exists(fullPath))
+            var (pathSafe, resolvedPath, pathReason) = SafetyPolicies.CheckFilePath(fullPath, cfg);
+            if (!pathSafe)
+            {
+                SafetyPolicies.Audit("file:read", $"BLOCKED path traversal: {rawPath} -> {fullPath}", false);
+                AnsiConsole.MarkupLine($"[red]Blocked read:[/] {pathReason}");
+                rest.Add(token);
+                continue;
+            }
+
+            if (!File.Exists(resolvedPath))
             {
                 if (rawPath.StartsWith("./") || rawPath.StartsWith("../") || rawPath.StartsWith("/") ||
                     rawPath.Contains(Path.DirectorySeparatorChar) || Path.HasExtension(rawPath))
@@ -84,21 +98,21 @@ public static class FileAttachment
 
             try
             {
-                var info = new FileInfo(fullPath);
+                var info = new FileInfo(resolvedPath);
 
                 string content;
                 if (info.Length > MaxBytes)
                 {
                     AnsiConsole.MarkupLine(
                         $"[dim]Truncating {Markup.Escape(info.Name)} to {MaxBytes / 1024} KB[/]");
-                    using var fs = File.OpenRead(fullPath);
+                    using var fs = File.OpenRead(resolvedPath);
                     var buf  = new byte[MaxBytes];
                     int read = fs.Read(buf, 0, MaxBytes);
                     content  = Encoding.UTF8.GetString(buf, 0, read) + "\n... [truncated]";
                 }
                 else
                 {
-                    content = File.ReadAllText(fullPath);
+                    content = File.ReadAllText(resolvedPath);
                 }
 
                 var lang = info.Extension.TrimStart('.').ToLowerInvariant();

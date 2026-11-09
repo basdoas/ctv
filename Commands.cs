@@ -9,7 +9,7 @@ public static class Commands
     {
         "/help", "/login", "/logout", "/signout", "/provider", "/model", "/theme", "/system", "/config", "/permissions",
         "/save", "/load", "/sessions", "/delete-session", "/questions", "/clear", "/quit",
-        "/vibe", "/easter",
+        "/settings", "/vibe", "/easter", "/memories", "/extensions", "/auth", "/artifacts",
     };
 
     /// <summary>
@@ -58,9 +58,24 @@ public static class Commands
             case "/theme":
                 {
                     var name = Ui.Choose("Theme", Ui.Themes.Select(x => x.Name));
+                    if (name == cfg.Theme) break;
+                    // Live preview: render banner with new theme before saving
+                    var preview = cfg.Theme;
                     cfg.Theme = name;
-                    ConfigStore.Save(cfg);
-                    AnsiConsole.MarkupLine($"Theme set to [bold]{Markup.Escape(name)}[/]");
+                    VibeScreen.RedrawScreen(cfg);
+                    AnsiConsole.MarkupLine($"Previewing theme [bold]{Markup.Escape(name)}[/] · Enter confirm · Esc cancel");
+                    var confirm = Ui.Choose("Keep this theme?", new[] { "Yes", "No" });
+                    if (confirm == "Yes")
+                    {
+                        ConfigStore.Save(cfg);
+                        AnsiConsole.MarkupLine($"Theme set to [bold]{Markup.Escape(name)}[/]");
+                    }
+                    else
+                    {
+                        cfg.Theme = preview;
+                        VibeScreen.RedrawScreen(cfg);
+                        AnsiConsole.MarkupLine("[dim]Theme unchanged.[/]");
+                    }
                     break;
                 }
 
@@ -77,6 +92,12 @@ public static class Commands
             case "/clear":
                 history.Clear();
                 SafetyGate.ClearSession();
+                break;
+
+            case "/settings":
+            case "/prefs":
+            case "/preferences":
+                ShowSettings(cfg);
                 break;
 
             case "/permissions":
@@ -157,6 +178,81 @@ public static class Commands
                     break;
                 }
 
+            case "/memories":
+                {
+                    var mems = Memories.Load();
+                    if (mems.Count == 0)
+                    {
+                        AnsiConsole.MarkupLine("[dim]No persistent memories yet.[/]");
+                        break;
+                    }
+                    var t = new Table().RoundedBorder().AddColumn("#").AddColumn("memory");
+                    for (int i = 0; i < mems.Count; i++)
+                        t.AddRow((i + 1).ToString(), Markup.Escape(mems[i]));
+                    AnsiConsole.Write(t);
+                    AnsiConsole.MarkupLine("[dim]Use /system to add a memory to the prompt, or edit ~/.config/ctv/memories.json[/]");
+                    break;
+                }
+
+            case "/extensions":
+                {
+                    var cmds = Extensions.GetAllCommands();
+                    if (cmds.Count == 0)
+                    {
+                        AnsiConsole.MarkupLine("[dim]No extensions installed. Add JSON manifests to ~/.config/ctv/extensions/[/]");
+                        break;
+                    }
+                    var t = new Table().RoundedBorder().AddColumn("command").AddColumn("description").AddColumn("shell command");
+                    foreach (var c in cmds)
+                        t.AddRow(Markup.Escape(c.Name), Markup.Escape(c.Description), Markup.Escape(c.ShellCommand));
+                    AnsiConsole.Write(t);
+                    break;
+                }
+
+            case "/auth":
+                {
+                    var statuses = Auth.StatusAll(cfg);
+                    if (statuses.Count == 0)
+                    {
+                        AnsiConsole.MarkupLine("[dim]No providers configured.[/]");
+                        break;
+                    }
+                    var t = new Table().RoundedBorder().AddColumn("provider").AddColumn("kind").AddColumn("state").AddColumn("key source");
+                    foreach (var s in statuses)
+                    {
+                        string state = s.State switch
+                        {
+                            AuthStateKind.Authenticated => "[green]authenticated[/]",
+                            AuthStateKind.FromEnvironment => "[green]from env[/]",
+                            _ => "[red]not configured[/]",
+                        };
+                        t.AddRow(Markup.Escape(s.ProviderName), s.Kind, state, Markup.Escape(s.KeySource ?? "-"));
+                    }
+                    AnsiConsole.Write(t);
+                    break;
+                }
+
+            case "/artifacts":
+                {
+                    var blocks = CodeBlocks.Last;
+                    if (blocks.Count == 0)
+                    {
+                        AnsiConsole.MarkupLine("[dim]No code blocks in the last response.[/]");
+                        break;
+                    }
+
+                    var artifactBlocks = blocks.Select(b => (b.Language, b.Code)).ToList();
+                    var modal = new VibeScreen.ArtifactModal(artifactBlocks);
+                    VibeScreen.RunModal(modal);
+
+                    if (!modal.Cancelled && modal.Result.Length > 0)
+                    {
+                        // Copy result to clipboard is not available; show it in transcript instead
+                        AnsiConsole.MarkupLine($"[green]Artifact {modal.SelectedIndex + 1} selected ({modal.Result.Length} chars).[/]");
+                    }
+                    break;
+                }
+
             default:
                 if (EasterEggs.TryHandle(line, out var egg) && egg is not null)
                 {
@@ -179,12 +275,14 @@ public static class Commands
         t.AddRow("/theme", "pick a color theme");
         t.AddRow("/system", "edit the system prompt");
         t.AddRow("/config", "show config file and configured providers");
+        t.AddRow("/settings", "settings & preferences menu (theme, step limit, auto-approve, provider, model...)");
         t.AddRow("/permissions", "view and manage the safety allow-list");
         t.AddRow("/save <name>", "save the current conversation");
         t.AddRow("/load <name>", "load a saved conversation");
         t.AddRow("/sessions", "list saved conversations");
         t.AddRow("/delete-session <name>", "remove a saved conversation");
         t.AddRow("/questions", "answer questions the AI asked earlier");
+        t.AddRow("/artifacts", "list code blocks from the last assistant response");
         t.AddRow("/clear", "clear the conversation and session permissions");
         t.AddRow("/quit", "exit");
         AnsiConsole.Write(t);
@@ -287,6 +385,218 @@ public static class Commands
         }
         AnsiConsole.Write(t);
         AnsiConsole.MarkupLine($"theme: [bold]{Markup.Escape(cfg.Theme)}[/]");
+    }
+
+    // ── settings & preferences ──────────────────────────────────────────────────────────────────
+    static string StepsText(int steps) => steps <= 0 ? "off (unlimited)" : steps.ToString();
+
+    /// <summary>The /settings menu: stays open after every change so several things can be adjusted in one go.</summary>
+    static void ShowSettings(AppConfig cfg)
+    {
+        if (!VibeScreen.Active)
+        {
+            AnsiConsole.MarkupLine("[yellow]The settings menu needs the full-screen UI.[/]");
+            return;
+        }
+
+        int selected = 0;
+        while (true)
+        {
+            var active = cfg.Active();
+            var items = new List<VibeScreen.MenuItem>
+            {
+                new("Provider", active?.Name ?? "none", "The service your messages are sent to. Add more with /login."),
+                new("Model", active?.Model ?? "-", "Browse the models your provider offers, or type a model name."),
+                new("Theme", cfg.Theme, "Colors of the banner, borders and accents. You can preview a theme before keeping it."),
+                new("Max agent steps", StepsText(cfg.MaxSteps), "How many tool rounds the agent may run for one message before it pauses and waits for you. The agent is told this number and its progress. Default: 8."),
+                new("Auto-approve", cfg.AutoApprove ? "on" : "off", "When on, file edits, shell commands and git actions run without asking. Only turn it on if you trust the model and the folder."),
+                new("Allow-list", $"{cfg.AllowedActions.Count} saved", "Actions you chose to always allow. Review or remove them here."),
+                new("System prompt", AnsiText.Truncate(cfg.SystemPrompt.Replace('\n', ' '), 30), "Instructions that shape how the assistant behaves in every conversation."),
+                new("Config file", Path.GetFileName(ConfigStore.FilePath), "Where these settings are stored: " + ConfigStore.FilePath),
+                new("Reset preferences", "", "Restore the theme, step limit and system prompt to their defaults. Providers, keys and the allow-list are kept."),
+            };
+
+            int? pick = VibeScreen.Menu("Settings & preferences", items, selected);
+            if (pick is null) return;
+            selected = pick.Value;
+
+            try
+            {
+                ApplySetting(items[selected].Label, cfg);
+            }
+            catch (OperationCanceledException)
+            {
+                // Esc inside a sub-dialog: just go back to the menu.
+            }
+        }
+    }
+
+    static void ApplySetting(string label, AppConfig cfg)
+    {
+        switch (label)
+        {
+            case "Provider":
+                SwitchProvider(cfg);
+                break;
+
+            case "Model":
+                {
+                    var p = cfg.Active();
+                    if (p is null) VibeScreen.Flash("Add a provider first (/login)");
+                    else PickModel(p, cfg);
+                    break;
+                }
+
+            case "Theme":
+                {
+                    var name = Ui.Choose("Theme", Ui.Themes.Select(x => x.Name));
+                    if (name == cfg.Theme) break;
+
+                    var previous = cfg.Theme;
+                    cfg.Theme = name;
+                    VibeScreen.RedrawScreen(cfg); // live preview: borders and accents change right away
+                    bool keep = false;
+                    try
+                    {
+                        keep = Ui.Choose($"Keep the {name} theme?", new[] { "Yes, keep it", "No, go back" })
+                            .StartsWith("Yes", StringComparison.Ordinal);
+                    }
+                    finally
+                    {
+                        if (keep)
+                        {
+                            ConfigStore.Save(cfg);
+                            VibeScreen.Flash($"Theme: {name}");
+                        }
+                        else
+                        {
+                            cfg.Theme = previous;
+                            VibeScreen.RedrawScreen(cfg);
+                        }
+                    }
+                    break;
+                }
+
+            case "Max agent steps":
+                SetMaxSteps(cfg);
+                break;
+
+            case "Auto-approve":
+                {
+                    if (cfg.AutoApprove)
+                    {
+                        SafetyGate.DisableAutoApprove(cfg);
+                        VibeScreen.Flash("Auto-approve is off");
+                    }
+                    else
+                    {
+                        var ok = Ui.Choose("Let the agent run commands and edit files without asking?",
+                            new[] { "No, keep asking", "Yes, turn auto-approve on" });
+                        if (ok.StartsWith("Yes", StringComparison.Ordinal))
+                        {
+                            cfg.AutoApprove = true;
+                            ConfigStore.Save(cfg);
+                            VibeScreen.Flash("Auto-approve is on");
+                        }
+                    }
+                    break;
+                }
+
+            case "Allow-list":
+                ManageAllowList(cfg);
+                break;
+
+            case "System prompt":
+                cfg.SystemPrompt = Ui.Ask("System prompt", cfg.SystemPrompt);
+                ConfigStore.Save(cfg);
+                VibeScreen.Flash("System prompt updated");
+                break;
+
+            case "Config file":
+                VibeScreen.Flash(ConfigStore.FilePath, 6000);
+                break;
+
+            case "Reset preferences":
+                {
+                    var sure = Ui.Choose("Reset theme, step limit and system prompt to their defaults?",
+                        new[] { "No, keep my settings", "Yes, reset" });
+                    if (sure.StartsWith("Yes", StringComparison.Ordinal))
+                    {
+                        var defaults = new AppConfig();
+                        cfg.Theme = defaults.Theme;
+                        cfg.MaxSteps = defaults.MaxSteps;
+                        cfg.SystemPrompt = defaults.SystemPrompt;
+                        ConfigStore.Save(cfg);
+                        VibeScreen.RedrawScreen(cfg);
+                        VibeScreen.Flash("Preferences reset to defaults");
+                    }
+                    break;
+                }
+        }
+    }
+
+    static void SetMaxSteps(AppConfig cfg)
+    {
+        const string off = "Off (no limit)";
+        const string custom = "Custom number…";
+        string current = cfg.MaxSteps <= 0 ? off : cfg.MaxSteps.ToString();
+        var choice = Ui.Choose($"Max agent steps per message (now: {current})",
+            new[] { "4", "8 (default)", "16", "32", "64", off, custom });
+
+        int value;
+        if (choice == off)
+        {
+            value = 0;
+        }
+        else if (choice == custom)
+        {
+            while (true)
+            {
+                var text = Ui.Ask("Max steps (1-1000, or 0 for no limit)", cfg.MaxSteps.ToString());
+                if (int.TryParse(text, out var n) && n >= 0 && n <= 1000)
+                {
+                    value = n;
+                    break;
+                }
+                VibeScreen.Flash("Enter a whole number from 0 to 1000");
+            }
+        }
+        else
+        {
+            value = int.Parse(choice.Split(' ')[0]);
+        }
+
+        cfg.MaxSteps = value;
+        ConfigStore.Save(cfg);
+        VibeScreen.Flash(value == 0 ? "Step limit is off" : $"Step limit: {value} per message");
+    }
+
+    static void ManageAllowList(AppConfig cfg)
+    {
+        if (cfg.AllowedActions.Count == 0)
+        {
+            VibeScreen.Flash("The allow-list is empty");
+            return;
+        }
+
+        const string clearAll = "Clear the whole allow-list";
+        const string back = "Back";
+        var options = cfg.AllowedActions.ToList();
+        options.Add(clearAll);
+        options.Add(back);
+
+        var pick = Ui.Choose("Allow-list · choose an entry to remove", options);
+        if (pick == back) return;
+        if (pick == clearAll)
+        {
+            cfg.AllowedActions.Clear();
+            ConfigStore.Save(cfg);
+            VibeScreen.Flash("Allow-list cleared");
+            return;
+        }
+
+        SafetyGate.RemoveAllowedAction(pick, cfg);
+        VibeScreen.Flash($"Removed: {pick}");
     }
 
     static void ShowPermissions(AppConfig cfg)
