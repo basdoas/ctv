@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
+using System.Text.RegularExpressions;
 
 namespace Ctv;
 
@@ -12,6 +14,8 @@ public static partial class VibeScreen
     static readonly ConcurrentQueue<object> EventQueue = new();
     static readonly SemaphoreSlim EventSignal = new(0);
     static readonly List<string> InputHistory = new();
+    static readonly Regex MouseRegex = new(@"\x1b\[<(\d+);(\d+);(\d+)", RegexOptions.Compiled);
+    static readonly Regex X10MouseRegex = new(@"\x1b\[M(.)(.)(.)", RegexOptions.Compiled);
     static volatile bool _ctrlCSignal;
     static long _lastCtrlC;
 
@@ -30,6 +34,40 @@ public static partial class VibeScreen
 
             try
             {
+                // Escape may start a mouse escape sequence (SGR mode 1006).
+                if (k.Key == ConsoleKey.Escape && k.KeyChar == '\x1b')
+                {
+                    var seq = new StringBuilder("\x1b");
+                    while (Console.KeyAvailable)
+                    {
+                        var next = Console.ReadKey(intercept: true);
+                        seq.Append(next.KeyChar);
+                        if (seq.Length >= 3 && (seq[^1] == 'M' || seq[^1] == 'm'))
+                            break;
+                    }
+
+                    var s = seq.ToString();
+                    if (s.Length >= 5 && s[0] == '\x1b' && s[1] == '[' && s[2] == '<')
+                    {
+                        var m = MouseRegex.Match(s);
+                        if (m.Success)
+                        {
+                            int button = int.Parse(m.Groups[1].Value);
+                            int x = int.Parse(m.Groups[2].Value);
+                            int y = int.Parse(m.Groups[3].Value);
+                            bool pressed = s.EndsWith("M");
+                            bool wheelUp = button == 64;
+                            bool wheelDown = button == 65;
+                            Emit(new MouseEvent(button, x, y, pressed, wheelUp, wheelDown));
+                            continue;
+                        }
+                    }
+
+                    // Plain Escape, not a mouse sequence.
+                    Emit(new ConsoleKeyInfo('\x1b', ConsoleKey.Escape, false, false, false));
+                    continue;
+                }
+
                 HandleKey(k);
             }
             catch
@@ -76,6 +114,12 @@ public static partial class VibeScreen
         }
 
         EventQueue.Enqueue(new KeyEvent(k, Stopwatch.GetTimestamp()));
+        EventSignal.Release();
+    }
+
+    static void Emit(MouseEvent m)
+    {
+        EventQueue.Enqueue(m);
         EventSignal.Release();
     }
 

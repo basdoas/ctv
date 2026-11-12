@@ -119,7 +119,7 @@ public static partial class VibeScreen
             Out = new StreamWriter(Console.OpenStandardOutput(), new UTF8Encoding(false), 1 << 16) { AutoFlush = false };
             _alt = true;
             _forceClear = true;
-            Out.Write("\x1b[?1049h\x1b[2J\x1b[H");
+            Out.Write("\x1b[?1049h\x1b[?1006h\x1b[?1000h\x1b[?1003h\x1b[2J\x1b[H");
             Out.Flush();
         }
         StartThreads();
@@ -133,7 +133,7 @@ public static partial class VibeScreen
             Monitor.TryEnter(Gate, 500, ref taken); // never hang process exit on a stuck repaint
             if (!_alt) return;
             _alt = false;
-            Out.Write("\x1b[?2026l\x1b[?25h\x1b[?1049l");
+            Out.Write("\x1b[?2026l\x1b[?25h\x1b[?1006l\x1b[?1000l\x1b[?1003l\x1b[?1049l");
             Out.Flush();
         }
         catch { /* terminal already gone */ }
