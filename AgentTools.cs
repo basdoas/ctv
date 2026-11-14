@@ -83,6 +83,9 @@ public static class AgentTools
             if (string.IsNullOrEmpty(fullPath))
             {
                 results.Add(("edit", rawPath, false));
+                sb.AppendLine("[Tool Result: edit_file path=" + rawPath + "]");
+                sb.AppendLine("Error: Invalid path.");
+                sb.AppendLine();
                 continue;
             }
 
@@ -92,6 +95,9 @@ public static class AgentTools
                 SafetyPolicies.Audit("file:write", $"BLOCKED path traversal: {rawPath} -> {fullPath}", false);
                 AnsiConsole.MarkupLine($"[red]Blocked edit:[/] {pathReason}");
                 results.Add(("edit", rawPath, false));
+                sb.AppendLine("[Tool Result: edit_file path=" + rawPath + "]");
+                sb.AppendLine("Error: " + pathReason);
+                sb.AppendLine();
                 continue;
             }
 
@@ -99,6 +105,9 @@ public static class AgentTools
             {
                 AnsiConsole.MarkupLine($"[red]Edit error:[/] empty <old> for {rawPath}");
                 results.Add(("edit", rawPath, false));
+                sb.AppendLine("[Tool Result: edit_file path=" + rawPath + "]");
+                sb.AppendLine("Error: empty <old> tag.");
+                sb.AppendLine();
                 continue;
             }
 
@@ -110,6 +119,9 @@ public static class AgentTools
             if (outcome == PermissionOutcome.Deny)
             {
                 results.Add(("edit", rawPath, false));
+                sb.AppendLine("[Tool Result: edit_file path=" + rawPath + "]");
+                sb.AppendLine("Permission denied by user.");
+                sb.AppendLine();
                 continue;
             }
 
@@ -118,20 +130,26 @@ public static class AgentTools
                 if (!File.Exists(fullPath))
                 {
                     results.Add(("edit", rawPath, false));
+                    sb.AppendLine("[Tool Result: edit_file path=" + rawPath + "]");
+                    sb.AppendLine("Error: File not found.");
+                    sb.AppendLine();
                     continue;
                 }
 
-                var content = await File.ReadAllTextAsync(fullPath, ct);
-                int index = content.IndexOf(oldText);
+                var content2 = await File.ReadAllTextAsync(fullPath, ct);
+                int index = content2.IndexOf(oldText);
                 if (index < 0)
                 {
                     results.Add(("edit", rawPath, false));
+                    sb.AppendLine("[Tool Result: edit_file path=" + rawPath + "]");
+                    sb.AppendLine("Error: <old> text not found in file.");
+                    sb.AppendLine();
                     continue;
                 }
 
                 int count = 0;
                 int pos = 0;
-                while ((pos = content.IndexOf(oldText, pos)) >= 0)
+                while ((pos = content2.IndexOf(oldText, pos)) >= 0)
                 {
                     count++;
                     pos += oldText.Length;
@@ -141,15 +159,21 @@ public static class AgentTools
                     AnsiConsole.MarkupLine($"[yellow]⚠ Found {count} occurrences; replacing the first one only.[/]");
                 }
 
-                var result = content.Remove(index, oldText.Length).Insert(index, newText);
+                var result = content2.Remove(index, oldText.Length).Insert(index, newText);
                 await File.WriteAllTextAsync(fullPath, result, ct);
                 AnsiConsole.MarkupLine($"[green]✓ Edited file:[/] [bold]{Markup.Escape(fullPath)}[/]");
                 results.Add(("edit", fullPath, true));
+                sb.AppendLine("[Tool Result: edit_file path=" + rawPath + "]");
+                sb.AppendLine("Edited " + fullPath + " (" + count + " occurrence(s) found).");
+                sb.AppendLine();
             }
             catch (Exception ex)
             {
                 AnsiConsole.MarkupLine($"[red]Error editing file:[/] {Markup.Escape(ex.Message)}");
                 results.Add(("edit", rawPath, false));
+                sb.AppendLine("[Tool Result: edit_file path=" + rawPath + "]");
+                sb.AppendLine("Error: " + ex.Message);
+                sb.AppendLine();
             }
         }
 
