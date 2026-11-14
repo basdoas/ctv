@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 using Ctv;
 
@@ -84,6 +85,26 @@ try
     {
         VibeScreen.AddMessage(new ChatMessage("system", "No provider configured yet - let's add one."), cfg);
         RunCaptured(() => Commands.AddProvider(cfg));
+    }
+
+    // ── MCP servers ─────────────────────────────────────────────────────
+    var mcpServers = McpManager.Servers(cfg);
+    if (mcpServers.Count > 0)
+    {
+        try
+        {
+            McpManager.StartAll(cfg);
+            var allTools = McpManager.AllTools();
+            if (allTools.Count > 0)
+            {
+                var toolList = string.Join(", ", allTools.Keys.Select(k => k.Replace("mcp:", "")));
+                VibeScreen.AddMessage(new ChatMessage("system", $"MCP tools available: {toolList}"), cfg);
+            }
+        }
+        catch (Exception ex)
+        {
+            VibeScreen.AddMessage(new ChatMessage("system", $"MCP startup error: {ex.Message}"), cfg);
+        }
     }
 
     while (true)
@@ -235,6 +256,16 @@ async Task Send(string text)
     VibeScreen.AddMessage(userMsg, cfg);
 
     var systemPrompt = SystemPrompts.Build(cfg);
+
+    // Append MCP tool descriptions so the AI knows what MCP tools are available
+    var mcpTools = McpManager.AllTools();
+    if (mcpTools.Count > 0)
+    {
+        var mcpToolList = string.Join("\n", mcpTools.Select(kv =>
+            $"- {kv.Key}: {kv.Value.Tool.Description}"));
+        var mcpHint = "\n" + "\n" + "AVAILABLE MCP TOOLS:" + "\n" + mcpToolList + "\n" + "Use <mcp_call server='name' tool='toolname'><arg key='value'/></mcp_call> to call them.";
+        systemPrompt += mcpHint;
+    }
 
     int maxSteps = Math.Max(0, cfg.MaxSteps); // 0 = no limit (set in /settings)
     bool limited = maxSteps > 0;
