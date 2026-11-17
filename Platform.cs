@@ -1,4 +1,6 @@
 
+using System.Diagnostics;
+
 namespace Ctv;
 
 /// <summary>
@@ -103,4 +105,56 @@ public static class Platform
         if (IsWindows) return $"\"{arg.Replace("\"", "\\\"")}\"";
         return $"'{arg.Replace("'", "'\\''")}'";
     }
+
+    /// <summary>Copy text to clipboard. Returns false if clipboard is unavailable.</summary>
+    public static bool SetClipboard(string text)
+    {
+        if (IsWindows)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    ArgumentList = { "-Command", $"[System.Windows.Forms.Clipboard]::SetText('{text.Replace("'", "''")}')" },
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+                var proc = Process.Start(psi);
+                proc.WaitForExit(2000);
+                return proc.ExitCode == 0;
+            }
+            catch { return false; }
+        }
+        else
+        {
+            foreach (var cmd in new[] { "wl-copy", "xclip -selection clipboard", "xsel --clipboard --input" })
+            {
+                try
+                {
+                    var parts = cmd.Split(' ');
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = parts[0],
+                        ArgumentList = { string.Join(' ', parts.Skip(1)) },
+                        UseShellExecute = false,
+                        RedirectStandardInput = true,
+                        CreateNoWindow = true,
+                    };
+                    var proc = Process.Start(psi);
+                    if (proc is null) continue;
+                    if (proc.StandardInput is null) continue;
+                    using (var sw = proc.StandardInput!)
+                    {
+                        sw.Write(text);
+                    }
+                    proc.WaitForExit(2000);
+                    if (proc.ExitCode == 0) return true;
+                }
+                catch { continue; }
+            }
+            return false;
+        }
+    }
+
 }

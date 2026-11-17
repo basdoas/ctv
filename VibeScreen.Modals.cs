@@ -557,6 +557,11 @@ public static partial class VibeScreen
                     return false;
                 case ConsoleKey.Enter:
                     Result = _blocks[_idx].Code;
+                    try
+                    {
+                        Platform.SetClipboard(_blocks[_idx].Code);
+                    }
+                    catch { /* clipboard unavailable */ }
                     return true;
             }
             return false;
