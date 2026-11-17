@@ -34,6 +34,8 @@ public sealed class AppConfig
     /// 0 turns the limit off. The agent is told this value (system prompt and tool results).
     /// </summary>
     public int MaxSteps { get; set; } = 8;
+    /// <summary>Approximate tokens per message for context estimation (chars / 4).</summary>
+    public int MaxContextTokens { get; set; } = 8192;
     public List<ProviderConfig> Providers { get; set; } = new();
 
     // ── Safety ────────────────────────────────────────────────────────────────

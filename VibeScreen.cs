@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Linq;
 using System.Text;
 using Spectre.Console;
 
@@ -45,6 +46,7 @@ public static partial class VibeScreen
     static int _lastW, _lastH;
 
     static bool _follow = true;   // transcript sticks to the bottom
+    static int _lastTokenCount = 0;
     static int _topLine;          // first visible transcript line when not following
     static int _lastMaxTop;       // largest valid _topLine at the last paint
 
@@ -336,6 +338,7 @@ public static partial class VibeScreen
         int cw = Math.Max(20, W - 2);
         var all = new List<string>(256);
         foreach (var e in _entries) all.AddRange(LinesFor(e, cw, theme));
+        _lastTokenCount = Tokenizer.EstimateHistory(_entries.Select(e => new ChatMessage(e.Kind, e.Text)).ToList());
         int maxTop = Math.Max(0, all.Count - tHeight);
         _lastMaxTop = maxTop;
         int top;
@@ -464,6 +467,7 @@ public static partial class VibeScreen
         string rightPlain = cfg.AutoApprove ? "auto-approve: on" : "auto-approve: off";
         if (todoPlain.Length > 0)
             rightPlain = $"{rightPlain}  ·  {todoPlain}";
+        rightPlain = $"{rightPlain}  ·  tokens: {Tokenizer.Format(_lastTokenCount)}";
         string rightStyled = cfg.AutoApprove ? $"{Green}{rightPlain}{Reset}" : $"{Dim}{rightPlain}{Reset}";
         int rightW = rightPlain.Length;
 
