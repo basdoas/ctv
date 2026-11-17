@@ -59,6 +59,10 @@ public sealed class AppConfig
 [JsonSerializable(typeof(McpConfig))]
 [JsonSerializable(typeof(List<McpServerConfig>))]
 [JsonSerializable(typeof(ExtensionManifest))]
+[JsonSerializable(typeof(List<MarketplaceEntry>))]
+[JsonSerializable(typeof(PluginSpec))]
+[JsonSerializable(typeof(List<PluginSpec>))]
+[JsonSerializable(typeof(MarketplaceManifest))]
 internal partial class ConfigJson : JsonSerializerContext;
 
 public sealed record Preset(string Id, string Name, string Kind, string BaseUrl, string Model, string? KeyEnv);

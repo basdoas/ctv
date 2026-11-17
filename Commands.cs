@@ -10,6 +10,7 @@ public static class Commands
         "/help", "/login", "/logout", "/signout", "/provider", "/model", "/theme", "/system", "/config", "/permissions",
         "/save", "/load", "/sessions", "/delete-session", "/questions", "/clear", "/quit",
         "/settings", "/vibe", "/easter", "/memories", "/extensions", "/auth", "/artifacts",
+        "/marketplace",
     };
 
     /// <summary>
@@ -249,6 +250,85 @@ public static class Commands
                     {
                         // Copy result to clipboard is not available; show it in transcript instead
                         AnsiConsole.MarkupLine($"[green]Artifact {modal.SelectedIndex + 1} selected ({modal.Result.Length} chars).[/]");
+                    }
+                    break;
+                }
+
+            case "/marketplace":
+                {
+                    if (arg.Length == 0)
+                    {
+                        var t = new Table().RoundedBorder().AddColumn("command").AddColumn("what it does");
+                        t.AddRow("/marketplace add <name> <url>", "Register a marketplace (git URL or local path)");
+                        t.AddRow("/marketplace list", "List registered marketplaces");
+                        t.AddRow("/marketplace browse", "Browse plugins from all marketplaces");
+                        t.AddRow("/marketplace install <plugin>@<marketplace>", "Install a plugin (adds MCP servers)");
+                        t.AddRow("/marketplace remove <name>", "Remove a marketplace");
+                        AnsiConsole.Write(t);
+                        AnsiConsole.MarkupLine("[dim]Marketplaces are compatible with Claude Code's marketplace.json format[/]");
+                        break;
+                    }
+
+                    var sub = arg.Split(' ', 2)[0].ToLowerInvariant();
+                    var subArg = arg.Length > sub.Length + 1 ? arg[(sub.Length + 1)..] : "";
+
+                    if (sub == "add")
+                    {
+                        var addParts = subArg.Split(' ', 2);
+                        if (addParts.Length < 2)
+                        {
+                            AnsiConsole.MarkupLine("[red]Usage:[/] /marketplace add <name> <url>");
+                            break;
+                        }
+                        var ok = MarketplaceManager.Add(addParts[0], addParts[1]);
+                        AnsiConsole.MarkupLine(ok ? $"[green]Marketplace '{parts[0]}' added.[/]" : $"[red]Failed to add marketplace '{parts[0]}'.[/]");
+                    }
+                    else if (sub == "list")
+                    {
+                        var list = MarketplaceManager.List();
+                        if (list.Count == 0)
+                        {
+                            AnsiConsole.MarkupLine("[dim]No marketplaces registered.[/]");
+                            break;
+                        }
+                        var t = new Table().RoundedBorder().AddColumn("name").AddColumn("url").AddColumn("enabled");
+                        foreach (var m in list)
+                            t.AddRow(Markup.Escape(m.Name), Markup.Escape(m.Url), m.Enabled ? "[green]yes[/]" : "[dim]no[/]");
+                        AnsiConsole.Write(t);
+                    }
+                    else if (sub == "browse")
+                    {
+                        var plugins = MarketplaceManager.BrowseAll();
+                        if (plugins.Count == 0)
+                        {
+                            AnsiConsole.MarkupLine("[dim]No plugins found in marketplaces.[/]");
+                            break;
+                        }
+                        var t = new Table().RoundedBorder().AddColumn("plugin").AddColumn("version").AddColumn("category").AddColumn("description");
+                        foreach (var p in plugins)
+                            t.AddRow(Markup.Escape(p.Name), Markup.Escape(p.Version), Markup.Escape(p.Category), Markup.Escape(p.Description));
+                        AnsiConsole.Write(t);
+                        AnsiConsole.MarkupLine("[dim]Install with: /marketplace install <plugin>@<marketplace>[/]");
+                    }
+                    else if (sub == "install")
+                    {
+                        var installParts = subArg.Split('@', 2);
+                        if (installParts.Length < 2)
+                        {
+                            AnsiConsole.MarkupLine("[red]Usage:[/] /marketplace install <plugin>@<marketplace>");
+                            break;
+                        }
+                        var ok = MarketplaceManager.Install(installParts[0], installParts[1], cfg);
+                        AnsiConsole.MarkupLine(ok ? $"[green]Plugin '{parts[0]}' installed from '{parts[1]}'.[/]" : $"[red]Failed to install '{parts[0]}'.[/]");
+                    }
+                    else if (sub == "remove")
+                    {
+                        var ok = MarketplaceManager.Remove(subArg.Trim());
+                        AnsiConsole.MarkupLine(ok ? $"[green]Marketplace '{subArg.Trim()}' removed.[/]" : $"[red]Marketplace '{subArg.Trim()}' not found.[/]");
+                    }
+                    else
+                    {
+                        AnsiConsole.MarkupLine($"[yellow]Unknown subcommand:[/] {sub}");
                     }
                     break;
                 }
