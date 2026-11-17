@@ -11,9 +11,10 @@ public static class AgentTools
     static readonly Regex ReadFileRegex = new(@"<read_file\s+path=[""'](?<path>[^""']+)[""']\s*/?>|<read_file>(?<path>.*?)</read_file>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
     static readonly Regex WriteFileRegex = new(@"<write_file\s+path=[""'](?<path>[^""']+)[""']\s*>(?<content>.*?)</write_file>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
     static readonly Regex EditFileRegex = new(@"<edit_file\s+path=[""'](?<path>[^""']+)[""']\s*>\s*<old>(?<old>.*?)</old>\s*<new>(?<new>.*?)</new>\s*</edit_file>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
+    static readonly Regex RememberRegex = new(@"<remember>(?<text>.*?)</remember>", RegexOptions.Singleline | RegexOptions.IgnoreCase);
 
     public static bool HasToolCalls(string text) =>
-        BashRegex.IsMatch(text) || ReadFileRegex.IsMatch(text) || WriteFileRegex.IsMatch(text) || EditFileRegex.IsMatch(text) || GitTools.HasGitCalls(text) || TodoTools.HasTodoCalls(text) || McpTools.HasMcpCalls(text);
+        BashRegex.IsMatch(text) || ReadFileRegex.IsMatch(text) || WriteFileRegex.IsMatch(text) || EditFileRegex.IsMatch(text) || GitTools.HasGitCalls(text) || TodoTools.HasTodoCalls(text) || McpTools.HasMcpCalls(text) || RememberRegex.IsMatch(text);
 
     public static async Task<string?> ExecuteToolCallsAsync(string responseText, AppConfig cfg, CancellationToken ct)
     {
@@ -280,6 +281,18 @@ public static class AgentTools
         if (!string.IsNullOrEmpty(mcpResults))
         {
             sb.Append(mcpResults);
+        }
+
+        foreach (Match match in RememberRegex.Matches(responseText))
+        {
+            var memoryText = match.Groups["text"].Value.Trim();
+            if (string.IsNullOrEmpty(memoryText)) continue;
+
+            Memories.Add(memoryText);
+            AnsiConsole.MarkupLine($"[green]✓ Memory saved:[/] [bold]{Markup.Escape(memoryText)}[/]");
+            sb.AppendLine($"[Tool Result: remember]");
+            sb.AppendLine($"Memory saved: {memoryText}");
+            sb.AppendLine();
         }
 
         var okCount = results.Count(r => r.Ok);

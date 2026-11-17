@@ -28,6 +28,14 @@ public static class Tokenizer
         return total;
     }
 
+    /// <summary>Truncate text to max chars with ellipsis.</summary>
+    public static string Truncate(string text, int max)
+    {
+        if (string.IsNullOrEmpty(text)) return "";
+        if (text.Length <= max) return text;
+        return text[..(max - 3)] + "...";
+    }
+
     /// <summary>Format token count for display (e.g. "1.2K").</summary>
     public static string Format(int tokens)
     {

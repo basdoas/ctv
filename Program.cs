@@ -255,6 +255,12 @@ async Task Send(string text)
     history.Add(userMsg);
     VibeScreen.AddMessage(userMsg, cfg);
 
+    // ── chat compression ──
+    if (cfg.MaxContextTokens > 0)
+    {
+        history = ChatCompressor.Compress(history, cfg.MaxContextTokens);
+    }
+
     var systemPrompt = SystemPrompts.Build(cfg);
 
     // Append MCP tool descriptions so the AI knows what MCP tools are available
