@@ -116,6 +116,9 @@ sealed class OpenAiCompatProvider(ProviderConfig p) : IChatProvider
                 w.WriteStartObject();
                 w.WriteString("model", p.Model);
                 w.WriteBoolean("stream", true);
+                if (p.Temperature.HasValue) w.WriteNumber("temperature", p.Temperature.Value);
+                if (p.TopP.HasValue) w.WriteNumber("top_p", p.TopP.Value);
+                if (p.MaxTokens.HasValue) w.WriteNumber("max_tokens", p.MaxTokens.Value);
                 w.WriteStartArray("messages");
                 w.WriteStartObject(); w.WriteString("role", "system"); w.WriteString("content", system); w.WriteEndObject();
                 foreach (var m in history)
@@ -152,7 +155,10 @@ sealed class AnthropicProvider(ProviderConfig p) : IChatProvider
             {
                 w.WriteStartObject();
                 w.WriteString("model", p.Model);
-                w.WriteNumber("max_tokens", 4096);
+                if (p.MaxTokens.HasValue) w.WriteNumber("max_tokens", p.MaxTokens.Value);
+                else w.WriteNumber("max_tokens", 4096);
+                if (p.Temperature.HasValue) w.WriteNumber("temperature", p.Temperature.Value);
+                if (p.TopP.HasValue) w.WriteNumber("top_p", p.TopP.Value);
                 w.WriteBoolean("stream", true);
                 w.WriteString("system", system);
                 w.WriteStartArray("messages");
@@ -197,6 +203,9 @@ sealed class GeminiProvider(ProviderConfig p) : IChatProvider
             Content = Providers.Json(w =>
             {
                 w.WriteStartObject();
+                if (p.Temperature.HasValue) w.WriteNumber("temperature", p.Temperature.Value);
+                if (p.TopP.HasValue) w.WriteNumber("top_p", p.TopP.Value);
+                if (p.MaxTokens.HasValue) w.WriteNumber("max_output_tokens", p.MaxTokens.Value);
                 w.WriteStartObject("systemInstruction");
                 w.WriteStartArray("parts");
                 w.WriteStartObject(); w.WriteString("text", system); w.WriteEndObject();

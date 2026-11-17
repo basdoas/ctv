@@ -14,6 +14,12 @@ public sealed class ProviderConfig
     /// <summary>Literal key, or "env:VAR_NAME" to read it from an environment variable.</summary>
     public string ApiKey { get; set; } = "";
     public string Model { get; set; } = "";
+    /// <summary>Sampling temperature (0.0-2.0). Null = provider default.</summary>
+    public double? Temperature { get; set; }
+    /// <summary>Nucleus sampling top_p (0.0-1.0). Null = provider default.</summary>
+    public double? TopP { get; set; }
+    /// <summary>Maximum tokens to generate. Null = provider default.</summary>
+    public int? MaxTokens { get; set; }
 }
 
 public sealed class AppConfig

@@ -409,6 +409,9 @@ public static class Commands
                 new("Model", active?.Model ?? "-", "Browse the models your provider offers, or type a model name."),
                 new("Theme", cfg.Theme, "Colors of the banner, borders and accents. You can preview a theme before keeping it."),
                 new("Max agent steps", StepsText(cfg.MaxSteps), "How many tool rounds the agent may run for one message before it pauses and waits for you. The agent is told this number and its progress. Default: 8."),
+                new("Temperature", FormatTemp(cfg), "Sampling randomness (0.0-2.0). Lower = more deterministic. Higher = more creative."),
+                new("Top P", FormatTopP(cfg), "Nucleus sampling (0.0-1.0). Limits token selection to top probability mass."),
+                new("Max tokens", FormatMaxTokens(cfg), "Maximum tokens to generate per response."),
                 new("Auto-approve", cfg.AutoApprove ? "on" : "off", "When on, file edits, shell commands and git actions run without asking. Only turn it on if you trust the model and the folder."),
                 new("Allow-list", $"{cfg.AllowedActions.Count} saved", "Actions you chose to always allow. Review or remove them here."),
                 new("System prompt", AnsiText.Truncate(cfg.SystemPrompt.Replace('\n', ' '), 30), "Instructions that shape how the assistant behaves in every conversation."),
@@ -446,6 +449,18 @@ public static class Commands
                     else PickModel(p, cfg);
                     break;
                 }
+
+            case "Temperature":
+                SetTemperature(cfg);
+                break;
+
+            case "Top P":
+                SetTopP(cfg);
+                break;
+
+            case "Max tokens":
+                SetMaxTokens(cfg);
+                break;
 
             case "Theme":
                 {
@@ -569,6 +584,64 @@ public static class Commands
         cfg.MaxSteps = value;
         ConfigStore.Save(cfg);
         VibeScreen.Flash(value == 0 ? "Step limit is off" : $"Step limit: {value} per message");
+    }
+
+    // ── model parameter formatting helpers ───────────────────────────────
+    static string FormatTemp(AppConfig cfg)
+    {
+        var p = cfg.Active();
+        if (p is null || !p.Temperature.HasValue) return "default";
+        return p.Temperature.Value.ToString("0.##");
+    }
+
+    static string FormatTopP(AppConfig cfg)
+    {
+        var p = cfg.Active();
+        if (p is null || !p.TopP.HasValue) return "default";
+        return p.TopP.Value.ToString("0.##");
+    }
+
+    static string FormatMaxTokens(AppConfig cfg)
+    {
+        var p = cfg.Active();
+        if (p is null || !p.MaxTokens.HasValue) return "default";
+        return p.MaxTokens.Value.ToString();
+    }
+
+    static void SetTemperature(AppConfig cfg)
+    {
+        var p = cfg.Active();
+        if (p is null) { VibeScreen.Flash("Add a provider first (/login)"); return; }
+        var text = Ui.Ask("Temperature (0.0-2.0, or blank for default)", p.Temperature?.ToString("0.##") ?? "");
+        if (string.IsNullOrWhiteSpace(text)) { p.Temperature = null; }
+        else if (double.TryParse(text, out var v) && v >= 0 && v <= 2) { p.Temperature = v; }
+        else { VibeScreen.Flash("Enter a number from 0.0 to 2.0"); return; }
+        ConfigStore.Save(cfg);
+        VibeScreen.Flash($"Temperature: {p.Temperature?.ToString("0.##") ?? "default"}");
+    }
+
+    static void SetTopP(AppConfig cfg)
+    {
+        var p = cfg.Active();
+        if (p is null) { VibeScreen.Flash("Add a provider first (/login)"); return; }
+        var text = Ui.Ask("Top P (0.0-1.0, or blank for default)", p.TopP?.ToString("0.##") ?? "");
+        if (string.IsNullOrWhiteSpace(text)) { p.TopP = null; }
+        else if (double.TryParse(text, out var v) && v >= 0 && v <= 1) { p.TopP = v; }
+        else { VibeScreen.Flash("Enter a number from 0.0 to 1.0"); return; }
+        ConfigStore.Save(cfg);
+        VibeScreen.Flash($"Top P: {p.TopP?.ToString("0.##") ?? "default"}");
+    }
+
+    static void SetMaxTokens(AppConfig cfg)
+    {
+        var p = cfg.Active();
+        if (p is null) { VibeScreen.Flash("Add a provider first (/login)"); return; }
+        var text = Ui.Ask("Max tokens (blank for default)", p.MaxTokens?.ToString() ?? "");
+        if (string.IsNullOrWhiteSpace(text)) { p.MaxTokens = null; }
+        else if (int.TryParse(text, out var v) && v > 0) { p.MaxTokens = v; }
+        else { VibeScreen.Flash("Enter a positive integer"); return; }
+        ConfigStore.Save(cfg);
+        VibeScreen.Flash($"Max tokens: {p.MaxTokens ?? 0}");
     }
 
     static void ManageAllowList(AppConfig cfg)
